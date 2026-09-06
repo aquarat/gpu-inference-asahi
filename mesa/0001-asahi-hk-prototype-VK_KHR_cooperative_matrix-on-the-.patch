@@ -1,0 +1,654 @@
+From 77e6f998f41161bb5867770a4e9c9fef805e8428 Mon Sep 17 00:00:00 2001
+From: Aaron <blue@aquarat.co.uk>
+Date: Sun, 6 Sep 2026 12:28:51 +0100
+Subject: [PATCH 1/3] asahi/hk: prototype VK_KHR_cooperative_matrix on the
+ SIMD-group matrix FMA
+
+The G13 ISA has simd_matrix_fmadd16/32 (dougallj/applegpu): an 8x8x8
+SIMD-group multiply-accumulate where every operand is a register pair per
+lane holding two elements of a tile, in the layout Metal's simdgroup_matrix
+uses (metal-flash-attention morton_order, Apple patent US11256518B2).
+
+* agx: new simd_matrix_fmadd opcode (8-byte SIMD-family encoding, bit 26
+  selects the 32-bit variant, set from the accumulator size at pack time),
+  register-pair read/write counts, emit from a new cmat_muladd_agx intrinsic.
+* nir: cmat_muladd_agx (vec2 x vec2 x vec2 -> vec2 per lane).
+* hk: hk_nir_lower_cooperative_matrix (from panvk's pass): everything is
+  split into 8x8 tiles by nir_lower_cooperative_matrix_flexible_dimensions,
+  cmat types become per-lane 2-vectors, loads/stores address the morton
+  layout, muladd -> cmat_muladd_agx. Mixed f16 x f16 + f32 widens A and B to
+  f32 (exact) and uses the f32 instruction (HK_CMAT_MIXED=1 tries the raw
+  mixed encoding instead, for experiments).
+* hk: advertise VK_KHR_cooperative_matrix (compute) with 16x16x16 and 8x8x8
+  f16/f16/f32, f16/f16/f16 and f32/f32/f32 subgroup-scope shapes.
+
+Tested on the M1 (G13G) with a standalone Vulkan test: all shapes and
+layouts bit-exact against a CPU reference.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VXX3uBLex4GVki947Lm5qV
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ src/asahi/compiler/agx_compile.c              |   8 +
+ src/asahi/compiler/agx_opcodes.py             |   7 +
+ src/asahi/compiler/agx_pack.c                 |  10 +
+ src/asahi/compiler/agx_validate.c             |   5 +
+ .../vulkan/hk_nir_lower_cooperative_matrix.c  | 373 ++++++++++++++++++
+ src/asahi/vulkan/hk_physical_device.c         |  56 +++
+ src/asahi/vulkan/hk_shader.c                  |   7 +
+ src/asahi/vulkan/hk_shader.h                  |   2 +
+ src/asahi/vulkan/meson.build                  |   1 +
+ src/compiler/nir/nir_intrinsics.py            |   7 +
+ 10 files changed, 476 insertions(+)
+ create mode 100644 src/asahi/vulkan/hk_nir_lower_cooperative_matrix.c
+
+diff --git a/src/asahi/compiler/agx_compile.c b/src/asahi/compiler/agx_compile.c
+index 187ad5e..ee33188 100644
+--- a/src/asahi/compiler/agx_compile.c
++++ b/src/asahi/compiler/agx_compile.c
+@@ -1737,6 +1737,14 @@ agx_emit_intrinsic(agx_builder *b, nir_intrinsic_instr *instr)
+       return agx_ballot_to(b, dst, agx_src_index(&instr->src[0]));
+    }
+ 
++   case nir_intrinsic_cmat_muladd_agx: {
++      agx_simd_matrix_fmadd_to(b, dst, agx_src_index(&instr->src[0]),
++                               agx_src_index(&instr->src[1]),
++                               agx_src_index(&instr->src[2]));
++      agx_emit_cached_split(b, dst, 2);
++      return NULL;
++   }
++
+    case nir_intrinsic_quad_ballot_agx: {
+       return agx_quad_ballot_to(b, dst, agx_src_index(&instr->src[0]));
+    }
+diff --git a/src/asahi/compiler/agx_opcodes.py b/src/asahi/compiler/agx_opcodes.py
+index f5afa46..3ad659e 100644
+--- a/src/asahi/compiler/agx_opcodes.py
++++ b/src/asahi/compiler/agx_opcodes.py
+@@ -253,6 +253,13 @@ for window, w_bit in [('quad_', 0), ('', 1)]:
+            encoding = (0b0100010 | (T_bit << 4) | (w_bit << 48), 8, _),
+            srcs = 2, imms = [cond, INVERT_COND])
+ 
++# 8x8x8 SIMD-group matrix multiply-accumulate: D = A * B + C, where each
++# operand is a register pair per lane (two matrix elements). Bit 26 selects
++# the 32-bit variant and is set at pack time from the operand size. Not
++# is_float: the src0 modifier slot (bits 26-27) is repurposed by this encoding.
++op("simd_matrix_fmadd", encoding = (0b01101111 | (1 << 27) | (1 << 63), 8, _),
++   srcs = 3)
++
+ # Pseudo-instructions for compares returning 1/0
+ op("icmp", _, srcs = 2, imms = [ICOND, INVERT_COND])
+ op("fcmp", _, srcs = 2, imms = [FCOND, INVERT_COND])
+diff --git a/src/asahi/compiler/agx_pack.c b/src/asahi/compiler/agx_pack.c
+index 6236c3c..5501de2 100644
+--- a/src/asahi/compiler/agx_pack.c
++++ b/src/asahi/compiler/agx_pack.c
+@@ -418,6 +418,16 @@ agx_pack_alu(struct util_dynarray *emission, agx_instr *I)
+    uint64_t raw = encoding.exact;
+    uint16_t extend = 0;
+ 
++   /* simd_matrix_fmadd16 vs fmadd32: bit 26 selects the 32-bit variant. The
++    * operands are register pairs; the generic ALU operand encoding of the
++    * first register with a 16/32-bit size flag is exactly the "paired" form.
++    */
++   if (I->op == AGX_OPCODE_SIMD_MATRIX_FMADD) {
++      pack_assert(I, I->dest[0].size == I->src[2].size);
++      if (I->dest[0].size == AGX_SIZE_32)
++         raw |= (1ull << 26);
++   }
++
+    // TODO: assert saturable
+    if (I->saturate)
+       raw |= (1 << 6);
+diff --git a/src/asahi/compiler/agx_validate.c b/src/asahi/compiler/agx_validate.c
+index 788b5e5..1aef4df 100644
+--- a/src/asahi/compiler/agx_validate.c
++++ b/src/asahi/compiler/agx_validate.c
+@@ -155,6 +155,7 @@ agx_write_registers(const agx_instr *I, unsigned d)
+    switch (I->op) {
+    case AGX_OPCODE_MOV:
+    case AGX_OPCODE_PHI:
++   case AGX_OPCODE_SIMD_MATRIX_FMADD:
+       /* Tautological */
+       return agx_index_size_16(I->dest[d]);
+ 
+@@ -247,6 +248,10 @@ agx_read_registers(const agx_instr *I, unsigned s)
+       /* Tautological */
+       return agx_index_size_16(I->src[0]);
+ 
++   case AGX_OPCODE_SIMD_MATRIX_FMADD:
++      /* Register pairs (two matrix elements per lane) */
++      return agx_index_size_16(I->src[s]);
++
+    case AGX_OPCODE_PHI:
+       if (I->src[s].type == AGX_INDEX_IMMEDIATE)
+          return size;
+diff --git a/src/asahi/vulkan/hk_nir_lower_cooperative_matrix.c b/src/asahi/vulkan/hk_nir_lower_cooperative_matrix.c
+new file mode 100644
+index 0000000..731e6b1
+--- /dev/null
++++ b/src/asahi/vulkan/hk_nir_lower_cooperative_matrix.c
+@@ -0,0 +1,373 @@
++/*
++ * Copyright © 2023 Bas Nieuwenhuizen
++ * Copyright © 2024 Collabora, Ltd.
++ * Copyright © 2026 Google LLC.
++ * SPDX-License-Identifier: MIT
++ *
++ * VK_KHR_cooperative_matrix for AGX. Derived from
++ * panvk_nir_lower_cooperative_matrix.c, retargeted at the 8x8x8 SIMD-group
++ * matrix multiply-accumulate (simd_matrix_fmadd16/32).
++ *
++ * The hardware tile is 8x8 over the 32-lane SIMD-group, two elements per lane,
++ * in the "morton" layout used by Metal's simdgroup_matrix (as reverse
++ * engineered for metal-flash-attention, Apple patent US11256518B2): the tile
++ * is four 4x4 quadrants of eight lanes each; inside a quadrant lane pairs walk
++ * the rows and each lane owns two horizontally adjacent elements:
++ *
++ *    q   = lane >> 3
++ *    row = (q >> 1) * 4 + ((lane >> 1) & 3)
++ *    col = (q & 1) * 4 + (lane & 1) * 2 + {0, 1}
++ *
++ * A, B, C and D all use this layout, so a cooperative matrix of any use is
++ * lowered to a per-lane 2-vector and loads/stores are pure addressing.
++ * Larger shapes are split into 8x8 tiles by
++ * nir_lower_cooperative_matrix_flexible_dimensions first.
++ */
++
++#include "hk_shader.h"
++#include "nir_builder.h"
++#include "util/hash_table.h"
++#include "util/u_debug.h"
++
++#define HK_CMAT_HW_DIM 8
++#define HK_CMAT_LANES  32
++
++struct lower_cmat_ctx {
++   struct hash_table *type_mapping;
++};
++
++/* Number of matrix elements each lane holds (the SPIR-V cmat length). */
++static unsigned
++get_cmat_length(struct glsl_cmat_description desc)
++{
++   assert(desc.rows == HK_CMAT_HW_DIM && desc.cols == HK_CMAT_HW_DIM);
++   return (desc.rows * desc.cols) / HK_CMAT_LANES;
++}
++
++static const struct glsl_type *
++remap_matrix_type(struct lower_cmat_ctx *ctx, const struct glsl_type *orig)
++{
++   struct hash_entry *entry = _mesa_hash_table_search(ctx->type_mapping, orig);
++   if (entry)
++      return entry->data;
++
++   const struct glsl_type *new_type = orig;
++   const struct glsl_type *leaf = glsl_without_array(orig);
++
++   if (glsl_type_is_cmat(leaf)) {
++      struct glsl_cmat_description desc = *glsl_get_cmat_description(leaf);
++      new_type = glsl_type_wrap_in_arrays(
++         glsl_vector_type(desc.element_type, get_cmat_length(desc)), orig);
++   }
++
++   _mesa_hash_table_insert(ctx->type_mapping, orig, (void *)new_type);
++   return new_type;
++}
++
++static bool
++remap_type_in_place(struct lower_cmat_ctx *ctx, const struct glsl_type **type)
++{
++   const struct glsl_type *new_type = remap_matrix_type(ctx, *type);
++   if (new_type == *type)
++      return false;
++
++   *type = new_type;
++   return true;
++}
++
++static struct glsl_cmat_description
++cmat_src_desc(nir_src src)
++{
++   return *glsl_get_cmat_description(nir_src_as_deref(src)->type);
++}
++
++static nir_def *
++load_cmat_src(nir_builder *b, nir_src src)
++{
++   nir_deref_instr *deref = nir_src_as_deref(src);
++   struct glsl_cmat_description desc = *glsl_get_cmat_description(deref->type);
++
++   return nir_build_load_deref(b, get_cmat_length(desc),
++                               glsl_base_type_bit_size(desc.element_type),
++                               &deref->def, 0);
++}
++
++static void
++store_cmat_src(nir_builder *b, nir_src dst, nir_def *val)
++{
++   nir_store_deref(b, nir_src_as_deref(dst), val, ~0);
++}
++
++/* (row, col of element 0) owned by this lane, see the layout comment above. */
++static void
++lane_origin(nir_builder *b, nir_def *lane, nir_def **row, nir_def **col)
++{
++   nir_def *q = nir_ushr_imm(b, lane, 3);
++   *row = nir_iadd(b, nir_imul_imm(b, nir_iand_imm(b, nir_ushr_imm(b, q, 1), 1), 4),
++                   nir_iand_imm(b, nir_ushr_imm(b, lane, 1), 3));
++   *col = nir_iadd(b, nir_imul_imm(b, nir_iand_imm(b, q, 1), 4),
++                   nir_imul_imm(b, nir_iand_imm(b, lane, 1), 2));
++}
++
++static bool
++lower_cmat_load_store(nir_builder *b, nir_intrinsic_instr *intr,
++                      const struct lower_cmat_ctx *ctx)
++{
++   const bool is_load = intr->intrinsic == nir_intrinsic_cmat_load;
++   const struct glsl_cmat_description desc = cmat_src_desc(intr->src[!is_load]);
++   const bool row_major =
++      nir_intrinsic_matrix_layout(intr) == GLSL_MATRIX_LAYOUT_ROW_MAJOR;
++   const unsigned length = get_cmat_length(desc);
++   nir_deref_instr *deref = nir_src_as_deref(intr->src[is_load]);
++
++   nir_def *lane = nir_load_subgroup_invocation(b);
++
++   const unsigned ptr_vec = glsl_get_vector_elements(deref->type);
++   const struct glsl_type *elem_type = glsl_scalar_type(desc.element_type);
++   const unsigned elem_size_B = glsl_base_type_bit_size(desc.element_type) / 8;
++   deref = nir_build_deref_cast(b, &deref->def, deref->modes, elem_type,
++                                elem_size_B);
++
++   const unsigned idx_bits = deref->def.bit_size;
++   /* The buffer pointee may be a vector (multicomponent), so its stride is in
++    * pointee units - scale it to the scalar elements we address.
++    */
++   nir_def *stride =
++      nir_imul_imm(b, nir_u2uN(b, intr->src[2].ssa, idx_bits), ptr_vec);
++
++   nir_def *row, *col0;
++   lane_origin(b, lane, &row, &col0);
++
++   nir_def *elems[NIR_MAX_VEC_COMPONENTS];
++   if (!is_load) {
++      nir_def *src = load_cmat_src(b, intr->src[!is_load]);
++      for (unsigned p = 0; p < length; p++)
++         elems[p] = nir_channel(b, src, p);
++   }
++
++   for (unsigned p = 0; p < length; p++) {
++      nir_def *col = nir_iadd_imm(b, col0, p);
++      nir_def *outer = row_major ? row : col;
++      nir_def *inner = row_major ? col : row;
++      nir_def *idx =
++         nir_iadd(b, nir_imul(b, nir_u2uN(b, outer, idx_bits), stride),
++                  nir_u2uN(b, inner, idx_bits));
++
++      nir_deref_instr *e = nir_build_deref_ptr_as_array(b, deref, idx);
++
++      if (is_load)
++         elems[p] = nir_load_deref(b, e);
++      else
++         nir_store_deref(b, e, elems[p], ~0);
++   }
++
++   if (is_load)
++      store_cmat_src(b, intr->src[0], nir_vec(b, elems, length));
++
++   nir_instr_remove(&intr->instr);
++   return true;
++}
++
++static bool
++lower_cmat_instr(nir_builder *b, nir_instr *instr, struct lower_cmat_ctx *ctx)
++{
++   /* Remap deref types. Processed in reverse, so the intrinsics below still
++    * see the original cmat-typed derefs when reading the description.
++    */
++   if (instr->type == nir_instr_type_deref) {
++      nir_deref_instr *deref = nir_instr_as_deref(instr);
++      return remap_type_in_place(ctx, &deref->type);
++   }
++
++   if (instr->type != nir_instr_type_intrinsic)
++      return false;
++
++   nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
++   b->cursor = nir_before_instr(instr);
++
++   switch (intr->intrinsic) {
++   case nir_intrinsic_cmat_construct: {
++      nir_def *r = nir_replicate(
++         b, intr->src[1].ssa, get_cmat_length(cmat_src_desc(intr->src[0])));
++      store_cmat_src(b, intr->src[0], r);
++      nir_instr_remove(instr);
++      return true;
++   }
++
++   case nir_intrinsic_cmat_length: {
++      const unsigned length = get_cmat_length(nir_intrinsic_cmat_desc(intr));
++      nir_def_replace(&intr->def, nir_imm_int(b, length));
++      return true;
++   }
++
++   case nir_intrinsic_cmat_extract: {
++      nir_def *mat = load_cmat_src(b, intr->src[0]);
++      nir_def *elem = nir_vector_extract(b, mat, intr->src[1].ssa);
++      nir_def_replace(&intr->def, elem);
++      return true;
++   }
++
++   case nir_intrinsic_cmat_insert: {
++      nir_def *mat = load_cmat_src(b, intr->src[2]);
++      nir_def *r = nir_vector_insert(b, mat, intr->src[1].ssa, intr->src[3].ssa);
++      store_cmat_src(b, intr->src[0], r);
++      nir_instr_remove(instr);
++      return true;
++   }
++
++   case nir_intrinsic_cmat_copy: {
++      nir_build_copy_deref(b, intr->src[0].ssa, intr->src[1].ssa);
++      nir_instr_remove(instr);
++      return true;
++   }
++
++   case nir_intrinsic_cmat_load:
++   case nir_intrinsic_cmat_store:
++      return lower_cmat_load_store(b, intr, ctx);
++
++   case nir_intrinsic_cmat_muladd: {
++      struct glsl_cmat_description a_desc = cmat_src_desc(intr->src[1]);
++      struct glsl_cmat_description c_desc = cmat_src_desc(intr->src[3]);
++      unsigned ab_bits = glsl_base_type_bit_size(a_desc.element_type);
++      unsigned c_bits = glsl_base_type_bit_size(c_desc.element_type);
++
++      nir_def *a = load_cmat_src(b, intr->src[1]);
++      nir_def *b_mat = load_cmat_src(b, intr->src[2]);
++      nir_def *acc = load_cmat_src(b, intr->src[3]);
++
++      /* Mixed f16 x f16 + f32: the hardware variant is selected by the
++       * accumulator size. Widen A and B elementwise (exact, same layout) and
++       * use the f32 instruction. HK_CMAT_MIXED=1 tries the raw mixed encoding
++       * instead (experiment: is it supported by the hardware?).
++       */
++      if (ab_bits != c_bits) {
++         static int mixed = -1;
++         if (mixed < 0)
++            mixed = debug_get_bool_option("HK_CMAT_MIXED", false);
++
++         if (!mixed) {
++            a = nir_f2f32(b, a);
++            b_mat = nir_f2f32(b, b_mat);
++         }
++      }
++
++      acc = nir_cmat_muladd_agx(b, a, b_mat, acc);
++      store_cmat_src(b, intr->src[0], acc);
++      nir_instr_remove(instr);
++      return true;
++   }
++
++   case nir_intrinsic_cmat_unary_op:
++   case nir_intrinsic_cmat_binary_op:
++   case nir_intrinsic_cmat_scalar_op: {
++      nir_def *a = load_cmat_src(b, intr->src[1]);
++      b->fp_math_ctrl = nir_intrinsic_fp_math_ctrl(intr);
++
++      nir_def *r;
++      if (intr->intrinsic == nir_intrinsic_cmat_unary_op) {
++         r = nir_build_alu1(b, nir_intrinsic_alu_op(intr), a);
++      } else {
++         nir_def *y = intr->intrinsic == nir_intrinsic_cmat_binary_op
++                         ? load_cmat_src(b, intr->src[2])
++                         : intr->src[2].ssa;
++         r = nir_build_alu2(b, nir_intrinsic_alu_op(intr), a, y);
++      }
++
++      b->fp_math_ctrl = nir_fp_fast_math;
++      store_cmat_src(b, intr->src[0], r);
++      nir_instr_remove(instr);
++      return true;
++   }
++
++   case nir_intrinsic_cmat_bitcast: {
++      store_cmat_src(b, intr->src[0], load_cmat_src(b, intr->src[1]));
++      nir_instr_remove(instr);
++      return true;
++   }
++
++   case nir_intrinsic_cmat_convert: {
++      struct glsl_cmat_description dst = cmat_src_desc(intr->src[0]);
++      struct glsl_cmat_description src = cmat_src_desc(intr->src[1]);
++      nir_def *ret = load_cmat_src(b, intr->src[1]);
++
++      /* Same layout for every use and type, so a convert is elementwise. */
++      if (dst.element_type != src.element_type) {
++         b->fp_math_ctrl = nir_intrinsic_fp_math_ctrl(intr);
++         nir_op op = nir_type_conversion_op(
++            nir_get_nir_type_for_glsl_base_type(src.element_type),
++            nir_get_nir_type_for_glsl_base_type(dst.element_type),
++            nir_rounding_mode_undef);
++         ret = nir_build_alu1(b, op, ret);
++         b->fp_math_ctrl = nir_fp_fast_math;
++      }
++
++      store_cmat_src(b, intr->src[0], ret);
++      nir_instr_remove(instr);
++      return true;
++   }
++
++   default:
++      return false;
++   }
++}
++
++static bool
++lower_cmat_impl(nir_function_impl *impl, struct lower_cmat_ctx *ctx)
++{
++   bool progress = false;
++
++   nir_foreach_function_temp_variable(var, impl) {
++      if (remap_type_in_place(ctx, &var->type))
++         progress = true;
++   }
++
++   nir_builder b = nir_builder_create(impl);
++   nir_foreach_block_reverse_safe(block, impl) {
++      nir_foreach_instr_reverse_safe(instr, block) {
++         if (lower_cmat_instr(&b, instr, ctx))
++            progress = true;
++      }
++   }
++
++   return nir_progress(progress, impl, nir_metadata_control_flow);
++}
++
++bool
++hk_nir_lower_cooperative_matrix(nir_shader *nir)
++{
++   if (nir->info.stage != MESA_SHADER_COMPUTE ||
++       !nir->info.cs.has_cooperative_matrix)
++      return false;
++
++   /* Everything becomes 8x8 tiles first. */
++   struct nir_lower_coopmat_args args = {
++      .m_gran = HK_CMAT_HW_DIM,
++      .n_gran = HK_CMAT_HW_DIM,
++      .k_gran = HK_CMAT_HW_DIM,
++   };
++   bool progress = nir_lower_cooperative_matrix_flexible_dimensions(nir, &args);
++
++   if (progress) {
++      NIR_PASS(_, nir, nir_opt_deref);
++      NIR_PASS(_, nir, nir_opt_dce);
++      NIR_PASS(_, nir, nir_remove_dead_variables,
++               nir_var_function_temp | nir_var_shader_temp, NULL);
++   }
++
++   struct lower_cmat_ctx ctx = {
++      .type_mapping = _mesa_pointer_hash_table_create(NULL),
++   };
++
++   nir_foreach_variable_with_modes(var, nir, nir_var_shader_temp) {
++      if (remap_type_in_place(&ctx, &var->type))
++         progress = true;
++   }
++
++   nir_foreach_function_impl(impl, nir) {
++      if (lower_cmat_impl(impl, &ctx))
++         progress = true;
++   }
++
++   _mesa_hash_table_destroy(ctx.type_mapping, NULL);
++   return progress;
++}
+diff --git a/src/asahi/vulkan/hk_physical_device.c b/src/asahi/vulkan/hk_physical_device.c
+index ecf6100..2c95ca9 100644
+--- a/src/asahi/vulkan/hk_physical_device.c
++++ b/src/asahi/vulkan/hk_physical_device.c
+@@ -55,6 +55,7 @@ hk_get_device_extensions(const struct hk_instance *instance,
+       .KHR_bind_memory2 = true,
+       .KHR_buffer_device_address = true,
+       .KHR_calibrated_timestamps = true,
++      .KHR_cooperative_matrix = true,
+       .KHR_copy_commands2 = true,
+       .KHR_create_renderpass2 = true,
+       .KHR_dedicated_allocation = true,
+@@ -378,6 +379,10 @@ hk_get_device_features(
+       .shaderZeroInitializeWorkgroupMemory = true,
+       .dynamicRendering = true,
+       .shaderIntegerDotProduct = true,
++
++      /* VK_KHR_cooperative_matrix */
++      .cooperativeMatrix = true,
++      .cooperativeMatrixRobustBufferAccess = false,
+       .maintenance4 = true,
+ 
+       /* Vulkan 1.4 */
+@@ -919,6 +924,9 @@ hk_get_device_properties(const struct agx_device *dev,
+       .minSubgroupSize = 32,
+       .maxSubgroupSize = 32,
+       .maxComputeWorkgroupSubgroups = 1024 / 32,
++
++      /* VK_KHR_cooperative_matrix */
++      .cooperativeMatrixSupportedStages = VK_SHADER_STAGE_COMPUTE_BIT,
+       .requiredSubgroupSizeStages = 0,
+       .maxInlineUniformBlockSize = HK_MAX_INLINE_UNIFORM_BLOCK_SIZE,
+       .maxPerStageDescriptorInlineUniformBlocks = 32,
+@@ -1536,3 +1544,51 @@ hk_GetPhysicalDeviceMultisamplePropertiesEXT(
+       pMultisampleProperties->maxSampleLocationGridSize = (VkExtent2D){0, 0};
+    }
+ }
++
++/* VK_KHR_cooperative_matrix.
++ *
++ * The hardware instruction is an 8x8x8 SIMD-group multiply-accumulate in f16
++ * or f32 (simd_matrix_fmadd16/32); the lowering tiles larger shapes into 8x8
++ * pieces, so 16x16x16 is offered too (it is what most applications probe
++ * for). A mixed f16 x f16 + f32 product is done in f32 after an exact
++ * elementwise widening of A and B, so it costs the same as the f32 shape.
++ */
++VKAPI_ATTR VkResult VKAPI_CALL
++hk_GetPhysicalDeviceCooperativeMatrixPropertiesKHR(
++   VkPhysicalDevice physicalDevice, uint32_t *pPropertyCount,
++   VkCooperativeMatrixPropertiesKHR *pProperties)
++{
++   VK_OUTARRAY_MAKE_TYPED(VkCooperativeMatrixPropertiesKHR, out, pProperties,
++                          pPropertyCount);
++
++   static const struct {
++      uint32_t m, n, k;
++      VkComponentTypeKHR ab, c;
++   } shapes[] = {
++      {16, 16, 16, VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR},
++      {16, 16, 16, VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT16_KHR},
++      {16, 16, 16, VK_COMPONENT_TYPE_FLOAT32_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR},
++      {8, 8, 8, VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR},
++      {8, 8, 8, VK_COMPONENT_TYPE_FLOAT16_KHR, VK_COMPONENT_TYPE_FLOAT16_KHR},
++      {8, 8, 8, VK_COMPONENT_TYPE_FLOAT32_KHR, VK_COMPONENT_TYPE_FLOAT32_KHR},
++   };
++
++   for (unsigned i = 0; i < ARRAY_SIZE(shapes); ++i) {
++      vk_outarray_append_typed(VkCooperativeMatrixPropertiesKHR, &out, p) {
++         *p = (VkCooperativeMatrixPropertiesKHR){
++            .sType = VK_STRUCTURE_TYPE_COOPERATIVE_MATRIX_PROPERTIES_KHR,
++            .MSize = shapes[i].m,
++            .NSize = shapes[i].n,
++            .KSize = shapes[i].k,
++            .AType = shapes[i].ab,
++            .BType = shapes[i].ab,
++            .CType = shapes[i].c,
++            .ResultType = shapes[i].c,
++            .saturatingAccumulation = false,
++            .scope = VK_SCOPE_SUBGROUP_KHR,
++         };
++      }
++   }
++
++   return vk_outarray_status(&out);
++}
+diff --git a/src/asahi/vulkan/hk_shader.c b/src/asahi/vulkan/hk_shader.c
+index 2b79e51..4a64e88 100644
+--- a/src/asahi/vulkan/hk_shader.c
++++ b/src/asahi/vulkan/hk_shader.c
+@@ -196,6 +196,13 @@ hk_get_spirv_options(struct vk_physical_device *vk_pdev,
+ void
+ hk_preprocess_nir_internal(struct vk_physical_device *vk_pdev, nir_shader *nir)
+ {
++   /* VK_KHR_cooperative_matrix: lower cmat types/intrinsics to per-lane
++    * 2-vectors and simd_matrix_fmadd while the memory accesses are still
++    * derefs (explicit IO is lowered later in hk_lower_nir) and before
++    * nir_lower_vars_to_ssa meets the cmat-typed variables.
++    */
++   NIR_PASS(_, nir, hk_nir_lower_cooperative_matrix);
++
+    /* Must lower before io to temps */
+    if (nir->info.stage == MESA_SHADER_FRAGMENT) {
+       NIR_PASS(_, nir, nir_lower_terminate_to_demote);
+diff --git a/src/asahi/vulkan/hk_shader.h b/src/asahi/vulkan/hk_shader.h
+index dfd16ea..3992f90 100644
+--- a/src/asahi/vulkan/hk_shader.h
++++ b/src/asahi/vulkan/hk_shader.h
+@@ -357,6 +357,8 @@ hk_buffer_addr_format(VkPipelineRobustnessBufferBehaviorEXT robustness)
+ bool hk_lower_uvs_index(nir_shader *s, mesa_shader_stage sw_stage,
+                         unsigned nr_vbos);
+ 
++bool hk_nir_lower_cooperative_matrix(nir_shader *nir);
++
+ bool
+ hk_nir_lower_descriptors(nir_shader *nir,
+                          const struct vk_pipeline_robustness_state *rs,
+diff --git a/src/asahi/vulkan/meson.build b/src/asahi/vulkan/meson.build
+index c025104..94c8362 100644
+--- a/src/asahi/vulkan/meson.build
++++ b/src/asahi/vulkan/meson.build
+@@ -33,6 +33,7 @@ hk_files = files(
+   'hk_image_view.h',
+   'hk_instance.c',
+   'hk_instance.h',
++  'hk_nir_lower_cooperative_matrix.c',
+   'hk_nir_lower_descriptors.c',
+   'hk_physical_device.c',
+   'hk_physical_device.h',
+diff --git a/src/compiler/nir/nir_intrinsics.py b/src/compiler/nir/nir_intrinsics.py
+index 3cba27f..e4a529c 100644
+--- a/src/compiler/nir/nir_intrinsics.py
++++ b/src/compiler/nir/nir_intrinsics.py
+@@ -2469,6 +2469,13 @@ intrinsic("load_active_subgroup_count_agx", dest_comp=1, flags=[CAN_ELIMINATE])
+ # Like ballot() but only within a quad.
+ intrinsic("quad_ballot_agx", src_comp=[1], dest_comp=1, flags=[CAN_ELIMINATE])
+ 
++# AGX 8x8x8 SIMD-group matrix multiply-accumulate (simd_matrix_fmadd16/32).
++# Every 8x8 tile is spread over the 32 lanes with two elements per lane, so
++# each operand is a 2-vector per lane: src[] = { a, b, c }, result = a * b + c.
++# The result/accumulator bit size is that of c; a and b are f16 or f32.
++intrinsic("cmat_muladd_agx", src_comp=[2, 2, 2], dest_comp=2, bit_sizes=src2,
++          flags=SUBGROUP_FLAGS)
++
+ # With [0, 1] clipping, no transform is needed on the output z' = z. But with [-1,
+ # 1] clipping, we need to transform z' = (z + w) / 2. We express both cases as a
+ # lerp between z and w, where this is the lerp coefficient: 0 for [0, 1] and 0.5
+-- 
+2.55.0
+

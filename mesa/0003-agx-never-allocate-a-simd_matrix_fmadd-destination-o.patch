@@ -1,0 +1,70 @@
+From 71969e371aeab8bc8fdcaa970d08230d52a9442e Mon Sep 17 00:00:00 2001
+From: Aaron <blue@aquarat.co.uk>
+Date: Sun, 6 Sep 2026 13:27:22 +0100
+Subject: [PATCH 3/3] agx: never allocate a simd_matrix_fmadd destination over
+ its A or B operand
+
+The register allocator early-kills a source whose last use is the current
+instruction and reuses its registers for the destination. simd_matrix_fmadd
+is a multi-cycle SIMD-group operation that still reads A and B while it
+writes D, so D over A or B returns garbage (found by ggml's flash-attention
+shader, reproduced with a padded shared-memory tile load whose register
+assignment happened to overlap). Accumulating in place (D over C) is fine
+and is the intended form. Keep A and B alive across the instruction.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VXX3uBLex4GVki947Lm5qV
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+---
+ src/asahi/compiler/agx_register_allocate.c | 20 ++++++++++++++++++--
+ 1 file changed, 18 insertions(+), 2 deletions(-)
+
+diff --git a/src/asahi/compiler/agx_register_allocate.c b/src/asahi/compiler/agx_register_allocate.c
+index a8c5519..4e90ded 100644
+--- a/src/asahi/compiler/agx_register_allocate.c
++++ b/src/asahi/compiler/agx_register_allocate.c
+@@ -1001,6 +1001,22 @@ pick_regs(struct ra_ctx *rctx, agx_instr *I, unsigned d)
+    return find_regs(rctx, I, d, count, align);
+ }
+ 
++/*
++ * Whether source s may be killed early, i.e. its registers reused for the
++ * destination of the same instruction. simd_matrix_fmadd is a multi-cycle
++ * SIMD-group operation that reads its A and B register pairs while it is
++ * already writing D: allocating D over A or B corrupts the result (observed
++ * on G13G), while accumulating in place (D over C) is the intended use.
++ */
++static bool
++can_kill_early(const agx_instr *I, unsigned s)
++{
++   if (I->op == AGX_OPCODE_SIMD_MATRIX_FMADD && s < 2)
++      return false;
++
++   return I->src[s].kill && !I->src[s].memory;
++}
++
+ static void
+ kill_source(struct ra_ctx *rctx, const agx_instr *I, unsigned s)
+ {
+@@ -1034,7 +1050,7 @@ try_kill_early_sources(struct ra_ctx *rctx, const agx_instr *I,
+       return;
+ 
+    for (unsigned s = first_source; s <= last_source; ++s) {
+-      if (I->src[s].kill && !I->src[s].memory) {
++      if (can_kill_early(I, s)) {
+          kill_source(rctx, I, s);
+          rctx->early_killed = true;
+          I->src[s].kill = false;
+@@ -1132,7 +1148,7 @@ agx_ra_assign_local(struct ra_ctx *rctx)
+          unsigned start = 0;
+ 
+          agx_foreach_ssa_src(I, s) {
+-            if (I->src[s].kill && !I->src[s].memory) {
++            if (can_kill_early(I, s)) {
+                unsigned reg = rctx->ssa_to_reg[I->src[s].value];
+ 
+                if (start == end || end != reg) {
+-- 
+2.55.0
+

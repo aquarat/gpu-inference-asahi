@@ -144,6 +144,34 @@ tokens and its converters drop `visual.proj`/`ln_post`; monatis/clip.cpp is
 CPU-only on a 2023 ggml), so [ggml/](ggml/) converts Immich's own ONNX to
 GGUF and runs the tower in ~250 lines on the public ggml backend API.
 
+### 5. Cooperative matrix on Honeykrisp (2026-09-06)
+
+Write-up: [reports/PHASE4_COOPMAT.md](reports/PHASE4_COOPMAT.md);
+patches: [mesa/](mesa/) (branch `coopmat` on aquarat/mesa).
+
+The G13 has an 8x8x8 SIMD-group matrix FMA (`simd_matrix_fmadd16/32`, the
+instruction behind Metal's `simdgroup_matrix`; encoding from dougallj's
+`applegpu`, lane layout from metal-flash-attention). Three patches on the
+Honeykrisp fork teach the `agx` compiler the opcode and give `hk` a
+panvk-style lowering of `VK_KHR_cooperative_matrix` onto it (16x16x16 and
+8x8x8, f16/f32, mixed f16 x f16 + f32 natively). Bit-exact on a standalone
+test, ggml `test-backend-ops` MUL_MAT 1106/1106; one register-allocator bug
+found by ggml's flash-attention shader (the destination must not overlap A or
+B). Loaded per process through `VK_DRIVER_FILES`, never installed:
+
+| workload | stock 26.1.8 | coopmat build |
+|---|---:|---:|
+| llama-bench Qwen2.5-0.5B Q8_0 pp512 | 783 t/s | **1055 t/s** (~1.04 TFLOPS, 40 % of FMA peak) |
+| CLIP ViT-H-14-378, one image, fa=0 / fa=1 | 1874 / 1776 ms | **1505** / 1578 ms |
+
+The M1 has no separate matrix unit (the op runs on the FMA ALUs), so this is
+utilisation, not extra peak; Apple's Metal GEMMs on the same instruction reach
+~80 %, so ~1.5-2x more is on the table from vectorised tile loads and
+ggml-side tile tuning. Not CTS-tested. Deployed for Immich's ML service only,
+through two `Environment=VK_*` lines in its unit: ViT-H image embedding
+1.80 -> 1.53 s in the service (cosine 0.9999 vs the stock driver), with the
+shared detector's p95 unchanged at ~36 ms during an embedding burst.
+
 ## What was learned
 
 * On Honeykrisp the per-dispatch floor for a dependent chain is ~3.2-3.5 us
@@ -170,10 +198,11 @@ GGUF and runs the tower in ~250 lines on the public ggml backend API.
 |---|---|
 | [mnn/](mnn/) | Two `git am` patches on alibaba/MNN `bef71b9`: the GCC 16 build fix and the Vulkan batch-recording default. |
 | [ncnn/](ncnn/) | Two patches on Tencent/ncnn tag `20260526`: SiLU fusion (`activation_type 7`) + optimizer pass, and barrier coalescing. |
+| [mesa/](mesa/) | Three patches on aquarat/mesa `local-deploy` @ `d105715` (= branch `coopmat`): `VK_KHR_cooperative_matrix` for Honeykrisp on the G13 SIMD-group matrix FMA, the native mixed-precision form, and the register-allocation fix. |
 | [ggml/](ggml/) | `convert_clip_onnx_to_gguf.py` (Immich ONNX to GGUF, f16/f32/Q8_0), `clip_vit.cpp` (ggml runner, Vulkan or CPU), the ORT reference/preprocessing script, comparison and benchmark scripts, build notes for llama.cpp `9e0e220`. |
 | [bench/](bench/) | The MNN/ncnn YOLO benchmark sources and the interleaved final A/B script behind PHASE1. |
 | [vk-dispatch/](vk-dispatch/) | The chain test, the per-process ICD loading of a private driver build, and the run scripts of the dispatch experiment. |
-| [reports/](reports/) | `VULKAN_DISPATCH_EXPERIMENT.md`, `PHASE1_RUNTIME.md`, `PHASE2_GGML.md`, `PHASE3_MNN_FUSION.md`, sanitised. |
+| [reports/](reports/) | `VULKAN_DISPATCH_EXPERIMENT.md`, `PHASE1_RUNTIME.md`, `PHASE2_GGML.md`, `PHASE3_MNN_FUSION.md`, `PHASE4_COOPMAT.md`, sanitised. |
 | [results/](results/) | Raw logs the reports quote: firmware-profiler timelines, strace/perf summaries, chain-test output, llama-bench and CLIP runs. |
 
 Not included: models (`.onnx`, `.mnn`, `.param/.bin`, `.gguf`), test images,
@@ -187,6 +216,6 @@ location as an argument or an environment variable.
 |---|---|
 | [aquarat/frigate-asahi](https://github.com/aquarat/frigate-asahi) | The NVR deployment: host detector service with its Vulkan backends (ncnn, MNN shim), `research/GPU_INFERENCE.md`, `research/GPU_RESCALE.md`, the earlier `bench_*.py` scripts, the AVD decode work. |
 | [aquarat/got-bringup](https://github.com/aquarat/got-bringup) | The patched Honeykrisp driver, its measurement harness and the `cstest`/`coherence` tests reused here. |
-| [aquarat/mesa](https://github.com/aquarat/mesa) `local-deploy` | The driver source the RPM was built from. |
+| [aquarat/mesa](https://github.com/aquarat/mesa) `local-deploy`, `coopmat` | The driver source the RPM was built from; `coopmat` = `local-deploy` + the three cooperative-matrix patches in [mesa/](mesa/). |
 | [aquarat/MNN](https://github.com/aquarat/MNN) | Intended mirror for the MNN branches; empty until a `workflow`-scoped token can push MNN's history (its `.github/workflows` are rejected otherwise). The patches here are the same commits. |
 | [aquarat/fedora-asahi-remix-notes](https://github.com/aquarat/fedora-asahi-remix-notes) | The index of all the Asahi work, with the project page for this thread. |
