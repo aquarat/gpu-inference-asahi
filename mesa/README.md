@@ -1,18 +1,27 @@
 # Honeykrisp: VK_KHR_cooperative_matrix on the M1's SIMD-group matrix FMA
 
-Three `git am` patches on [aquarat/mesa](https://github.com/aquarat/mesa) branch `local-deploy` @ `d105715`
-(Mesa 26.3.0-devel; the fork's Honeykrisp with the got-bringup compiler work). The same commits are pushed as branch
-[`coopmat`](https://github.com/aquarat/mesa/tree/coopmat) (`77e6f99`, `7dd673b`, `71969e3`). Nothing in them depends
+Four `git am` patches on [aquarat/mesa](https://github.com/aquarat/mesa) branch `local-deploy` @ `d105715`
+(Mesa 26.3.0-devel; the fork's Honeykrisp with the got-bringup compiler work). The first three are pushed as branch
+[`coopmat`](https://github.com/aquarat/mesa/tree/coopmat) (`77e6f99`, `7dd673b`, `71969e3`), all four as
+[`coopmat-vecload`](https://github.com/aquarat/mesa/tree/coopmat-vecload). Nothing in them depends
 on the fork's other commits, so they should apply to upstream `main` with at most path drift.
-Write-up: [../reports/PHASE4_COOPMAT.md](../reports/PHASE4_COOPMAT.md).
+Write-ups: [../reports/PHASE4_COOPMAT.md](../reports/PHASE4_COOPMAT.md) (patches 1-3) and
+[../reports/PHASE5_COOPMAT_TUNING.md](../reports/PHASE5_COOPMAT_TUNING.md) (patch 4, plus the ggml-side
+tuning in [../ggml/patches/](../ggml/patches/)).
 
 | patch | what |
 |---|---|
 | `0001-asahi-hk-prototype-VK_KHR_cooperative_matrix-on-the-.patch` | The extension. `agx`: one new opcode `simd_matrix_fmadd` (encoding `0x800000000800006f`, the G13's `simd_matrix_fmadd16/32` from dougallj's `applegpu`, 8x8x8 on a 32-lane SIMD-group, two elements per lane in Metal's `simdgroup_matrix` layout), packed by the generic ALU packer; a `cmat_muladd_agx` NIR intrinsic; emitter, validator, read/write-register cases. `hk`: a ~370-line lowering pass modelled on panvk's (`nir_lower_cooperative_matrix_flexible_dimensions` splits every shape into 8x8 tiles, then `cmat_*` intrinsics become per-lane `vec2` ops and per-element loads/stores with the lane's `(row, col)` from the layout formula); `KHR_cooperative_matrix` advertised for compute with six shapes: 16x16x16 and 8x8x8 in f16/f16/f32/f32, f16/f16/f16/f16, f32/f32/f32/f32. No integer shapes (the ISA has none on G13), no bf16. |
 | `0002-asahi-hk-use-the-native-mixed-f16-x-f16-f32-matrix-F.patch` | The hardware honours per-operand size flags: f16 register pairs for A and B with an f32 pair for C/D (instruction bit 26 set from the accumulator size) is bit-exact and accumulates in true f32 (a `4096 + 8 x 1/64` probe returns 4096.125 exactly). Makes that the default; `HK_CMAT_WIDEN=1` keeps the widen-to-f32 form. |
 | `0003-agx-never-allocate-a-simd_matrix_fmadd-destination-o.patch` | The bug ggml's flash-attention shader found: the register allocator "early-kills" a source whose last use is the current instruction and may put D over A or B; the multi-cycle SIMD-group op keeps reading its inputs while writing outputs, so that corrupts one output block. `can_kill_early()` refuses it for sources 0 and 1 (D over C, i.e. accumulate in place, is fine). |
+| `0004-asahi-hk-add-an-opt-in-vectorised-cooperative-matrix.patch` | `HK_CMAT_VECLOAD=1/2` moves a lane's two elements of a row-major tile with one access instead of two (the pair is adjacent in memory in that orientation; the column-major case keeps the scalar path). Bit-exact, 1106/1106 MUL_MAT, and the shader comes out smaller (2813 vs 2990 instructions, 147 vs 155 GPRs) -- but it measures **slower** on G13G once ggml's inner loop stops re-issuing the same tile load (-12 % on pp512), so it ships off by default. See the Phase 5 report for the numbers and what was ruled out. |
 
 ## Numbers (M1 Mac mini, G13G, NVR live on the same GPU)
+
+Phase 5 update: with `ggml/patches/0001` (hoisting the redundant tile load out of ggml's coopmat inner
+loop) and the driver's default scalar tile loads, pp512 Q8_0 reaches **1134 t/s** (~1.13 TFLOPS, 43 % of
+peak) and ViT-H-14-378 CLIP **1375 ms**. Patch 0004's vectorised loads are off by default -- see
+[../reports/PHASE5_COOPMAT_TUNING.md](../reports/PHASE5_COOPMAT_TUNING.md).
 
 * Correctness: bit-exact on a standalone test in every advertised shape/type/layout (incl. column-major B and a padded-stride shared-memory staging variant); ggml `test-backend-ops -o MUL_MAT` **1106/1106** with `matrix cores: KHR_coopmat`; the FLASH_ATTN_EXT subsets that exercise the coopmat path pass (the only remaining failures are q5_0/q5_1 K/V cases that fail identically with coopmat disabled).
 * `llama-bench` Qwen2.5-0.5B pp512: Q8_0 **783 -> 1055 t/s** (+35 %, ~1.04 TFLOPS = 40 % of the 2.6 TFLOPS FMA peak), F16 757 -> 1016 t/s; token generation unchanged (memory-bound).

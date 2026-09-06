@@ -1,0 +1,73 @@
+From 11edbbafb184854c10f5c59e575ca9e725fa1c35 Mon Sep 17 00:00:00 2001
+From: Aaron <blue@aquarat.co.uk>
+Date: Sun, 6 Sep 2026 15:21:39 +0100
+Subject: [PATCH 1/2] vulkan: hoist the A tile load out of the coopmat mul_mm
+ inner loop
+
+The coopmat1 inner loop of mul_mm reloads a cooperative matrix on every
+iteration of the loop nested inside it: with the loads ordered
+(cm_row -> load A, cm_col -> load B, multiply) the B tile is fetched
+cms_per_row times per k step instead of once. On drivers whose backend
+does not eliminate redundant shared-memory loads that is a real cost -
+for the 128x128x32 warptile it is 16 tile loads per k step where 8 would
+do.
+
+Load all cms_per_row A tiles into a register array once per k step and
+iterate cm_col outside, so both operands are fetched exactly once. The
+register cost is cms_per_row A tiles, which is small next to the
+cms_per_row * cms_per_col accumulators already live.
+
+On an Apple M1 (G13G, 32-wide subgroups, 8x8x8 hardware tiles) with the
+Honeykrisp VK_KHR_cooperative_matrix implementation:
+
+  llama-bench pp512 Q8_0, Qwen2.5-0.5B   1002 -> 1134 t/s  (+13 %)
+  llama-bench pp512 F16                  1017 -> 1110 t/s  (+9 %)
+  ViT-H-14-378 CLIP, f16, fa=0           1505 -> 1375 ms   (1.09x)
+
+test-backend-ops -o MUL_MAT: 1106/1106, unchanged. Hoisting B instead of
+A is also a win but a smaller one (1104 t/s).
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VXX3uBLex4GVki947Lm5qV
+---
+ ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp | 14 ++++++++------
+ 1 file changed, 8 insertions(+), 6 deletions(-)
+
+diff --git a/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp b/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp
+index 63c4aae..6e4894c 100644
+--- a/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp
++++ b/ggml/src/ggml-vulkan/vulkan-shaders/mul_mm.comp
+@@ -268,7 +268,7 @@ void main() {
+ #endif
+ 
+ #ifdef COOPMAT
+-    coopmat<FLOAT_TYPE, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> cache_a;
++    coopmat<FLOAT_TYPE, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> cache_a[cms_per_row];
+     coopmat<FLOAT_TYPE, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> cache_b;
+     coopmat<ACC_TYPE, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> sums[cms_per_row * cms_per_col];
+ 
+@@ -309,14 +309,16 @@ void main() {
+ 
+ #ifdef COOPMAT
+         [[unroll]] for (uint i = 0; i < BK; i += TK) {
++            // Load each A tile once per k step instead of once per (k, cm_col).
+             [[unroll]] for (uint cm_row = 0; cm_row < cms_per_row; cm_row++) {
+-                // Load from shared into cache
+-                coopMatLoad(cache_a, buf_a, a_shmem_index(warp_r * WM + cm_row * TM, i / 2), a_shmem_stride(), gl_CooperativeMatrixLayoutRowMajor);
++                coopMatLoad(cache_a[cm_row], buf_a, a_shmem_index(warp_r * WM + cm_row * TM, i / 2), a_shmem_stride(), gl_CooperativeMatrixLayoutRowMajor);
++            }
+ 
+-                [[unroll]] for (uint cm_col = 0; cm_col < cms_per_col; cm_col++) {
+-                    coopMatLoad(cache_b, buf_b, (warp_c * WN + cm_col * TN) * SHMEM_STRIDE + i / 2, SHMEM_STRIDE, gl_CooperativeMatrixLayoutColumnMajor);
++            [[unroll]] for (uint cm_col = 0; cm_col < cms_per_col; cm_col++) {
++                coopMatLoad(cache_b, buf_b, (warp_c * WN + cm_col * TN) * SHMEM_STRIDE + i / 2, SHMEM_STRIDE, gl_CooperativeMatrixLayoutColumnMajor);
+ 
+-                    sums[cm_col * cms_per_row + cm_row] = coopMatMulAdd(cache_a, cache_b, sums[cm_col * cms_per_row + cm_row]);
++                [[unroll]] for (uint cm_row = 0; cm_row < cms_per_row; cm_row++) {
++                    sums[cm_col * cms_per_row + cm_row] = coopMatMulAdd(cache_a[cm_row], cache_b, sums[cm_col * cms_per_row + cm_row]);
+                 }
+             }
+         }
+-- 
+2.55.0
+

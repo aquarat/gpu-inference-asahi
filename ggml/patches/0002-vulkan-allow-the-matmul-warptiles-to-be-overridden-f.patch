@@ -1,0 +1,60 @@
+From f475523b3a57e97cc36c6dae20e85f7074f29750 Mon Sep 17 00:00:00 2001
+From: Aaron <blue@aquarat.co.uk>
+Date: Sun, 6 Sep 2026 15:21:39 +0100
+Subject: [PATCH 2/2] vulkan: allow the matmul warptiles to be overridden from
+ the environment
+
+GGML_VK_WT_{L,M,S}[_MMQ] take the eleven warptile spec constants
+("BLOCK_SIZE,BM,BN,BK,WM,WN,WMITER,TM,TN,TK,WARP") so tile shapes can be
+swept on a new device without a rebuild. The workgroup denominators are
+not overridable, so BM/BN must be left alone; WM/WN/BLOCK_SIZE/BK are the
+useful knobs. Ignored, with a message, if the value does not parse.
+
+Used to check tile sensitivity on an Apple M1 (G13G): with the 8x8x8
+hardware tile and 32-wide subgroups, splitting the 128x128 workgroup tile
+differently between warps (64x64 / 32x64 / 64x32 / 32x32) moves
+llama-bench pp512 Q8_0 by less than 3 %, so the generic table is left as
+it is for that device.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VXX3uBLex4GVki947Lm5qV
+---
+ ggml/src/ggml-vulkan/ggml-vulkan.cpp | 22 ++++++++++++++++++++++
+ 1 file changed, 22 insertions(+)
+
+diff --git a/ggml/src/ggml-vulkan/ggml-vulkan.cpp b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+index a04a6b2..8b62dd4 100644
+--- a/ggml/src/ggml-vulkan/ggml-vulkan.cpp
++++ b/ggml/src/ggml-vulkan/ggml-vulkan.cpp
+@@ -4388,6 +4388,28 @@ static void ggml_vk_load_shaders(vk_device& device, vk_pipeline requested) {
+             l_warptile_mmq = { 512, 128, 128, 32, mm_warp_8, 32, 2, tm_m, tn_m, tk_m, mm_warp_8 };
+         }
+ 
++        // Experimental: override the coopmat warptiles from the environment so
++        // tile shapes can be swept without a rebuild. Format (11 values):
++        //   GGML_VK_WT_{L,M,S}="BLOCK_SIZE,BM,BN,BK,WM,WN,WMITER,TM,TN,TK,WARP"
++        // GGML_VK_WT_*_MMQ overrides the quantised variant (BK is usually 32).
++        {
++            auto parse_wt = [](const char *name, std::vector<uint32_t> &wt) {
++                const char *v = getenv(name);
++                if (!v) return;
++                std::vector<uint32_t> out;
++                const char *p2 = v;
++                while (*p2) { out.push_back((uint32_t)strtoul(p2, (char**)&p2, 10)); if (*p2 == ',') p2++; else break; }
++                if (out.size() == wt.size()) { wt = out; std::cerr << "ggml_vulkan: " << name << " = " << v << std::endl; }
++                else std::cerr << "ggml_vulkan: ignoring " << name << " (need " << wt.size() << " values)" << std::endl;
++            };
++            parse_wt("GGML_VK_WT_L", l_warptile);
++            parse_wt("GGML_VK_WT_M", m_warptile);
++            parse_wt("GGML_VK_WT_S", s_warptile);
++            parse_wt("GGML_VK_WT_L_MMQ", l_warptile_mmq);
++            parse_wt("GGML_VK_WT_M_MMQ", m_warptile_mmq);
++            parse_wt("GGML_VK_WT_S_MMQ", s_warptile_mmq);
++        }
++
+         l_mmq_wg_denoms = l_wg_denoms = {128, 128, 1 };
+         m_mmq_wg_denoms = m_wg_denoms = { 64,  64, 1 };
+         s_mmq_wg_denoms = s_wg_denoms = { 32,  32, 1 };
+-- 
+2.55.0
+
