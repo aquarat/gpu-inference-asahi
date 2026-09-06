@@ -1,0 +1,90 @@
+From 828d0925c0988a7dc07f19959e5f83cb778c34f3 Mon Sep 17 00:00:00 2001
+From: Aaron <blue@aquarat.co.uk>
+Date: Sun, 6 Sep 2026 13:38:41 +0100
+Subject: [PATCH 5/5] feat(ml): mnn device for the machine-learning image and
+ docs
+
+Adds builder-mnn and prod-mnn stages (the CPU image with the mnn extra and
+MACHINE_LEARNING_MNN enabled) and documents the backend and its settings.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VXX3uBLex4GVki947Lm5qV
+---
+ docs/docs/features/ml-hardware-acceleration.md | 2 +-
+ docs/docs/install/environment-variables.md     | 4 ++++
+ machine-learning/Dockerfile                    | 8 ++++++++
+ machine-learning/README.md                     | 4 ++++
+ 4 files changed, 17 insertions(+), 1 deletion(-)
+
+diff --git a/docs/docs/features/ml-hardware-acceleration.md b/docs/docs/features/ml-hardware-acceleration.md
+index dbf42b1..06adfb2 100644
+--- a/docs/docs/features/ml-hardware-acceleration.md
++++ b/docs/docs/features/ml-hardware-acceleration.md
+@@ -97,7 +97,7 @@ You do not need to redo any machine learning jobs after enabling hardware accele
+ ## Setup
+ 
+ 1. If you do not already have it, download the latest [`hwaccel.ml.yml`][hw-file] file and ensure it's in the same folder as the `docker-compose.yml`.
+-2. In `immich-machine-learning`, add one of -[armnn, cuda, ggml, rocm, openvino, rknn] to the `image` section's tag at the end of the line.
++2. In `immich-machine-learning`, add one of -[armnn, cuda, ggml, rocm, openvino, rknn] to the `image` section's tag at the end of the line. (The `-mnn` tag is not a hardware backend: it runs the facial recognition models on the CPU through MNN, which is 2-3x faster than ONNX Runtime for them on Arm CPUs, and needs no `extends` entry.)
+ 3. Still in the `docker-compose.yml` under `immich-machine-learning`, uncomment the `extends` section and change `cpu` to the appropriate backend.
+ 4. Redeploy the `immich-machine-learning` container with these updated settings.
+ 
+diff --git a/docs/docs/install/environment-variables.md b/docs/docs/install/environment-variables.md
+index d3d4e35..683d7b6 100644
+--- a/docs/docs/install/environment-variables.md
++++ b/docs/docs/install/environment-variables.md
+@@ -184,6 +184,10 @@ Redis (Sentinel) URL example JSON before encoding:
+ | `MACHINE_LEARNING_GGML_WEIGHT_TYPE`                         | Weight storage for the ggml backend: `f16` or `q8_0` (half the GPU memory)                                                                                   |            `f16`             | machine learning |
+ | `MACHINE_LEARNING_GGML_FLASH_ATTN`                          | Use the fused flash attention op on the ggml backend                                                                                                         |            `True`            | machine learning |
+ | `MACHINE_LEARNING_GGML_THREADS`                             | CPU threads for ggml ops the GPU cannot run                                                                                                                  |             `4`              | machine learning |
++| `MACHINE_LEARNING_MNN`                                      | Run facial recognition models on MNN's CPU backend instead of ONNX Runtime, in the `-mnn` image or when the `mnn` package is installed                        |           `False`            | machine learning |
++| `MACHINE_LEARNING_MNN_PRECISION`                            | Arithmetic precision of the MNN backend: `FP32` or `FP16` (faster on CPUs with fp16 support, but MNN 3.6 returned wrong outputs for some inputs; validate first) |            `FP32`            | machine learning |
++| `MACHINE_LEARNING_MNN_THREADS`                              | CPU threads for the MNN backend                                                                                                                              |             `4`              | machine learning |
++| `MACHINE_LEARNING_MNN_TEXTUAL`                              | Also run CLIP text models on the MNN backend (slower than ONNX Runtime at `FP32`)                                                                            |           `False`            | machine learning |
+ | `MACHINE_LEARNING_MODEL_ARENA`                              | Pre-allocates CPU memory to avoid memory fragmentation                                                                                                       |             true             | machine learning |
+ | `MACHINE_LEARNING_OPENVINO_PRECISION`                       | If set to FP16, uses half-precision floating-point operations for faster inference with reduced accuracy (one of [`FP16`, `FP32`], applies only to OpenVINO) |            `FP32`            | machine learning |
+ 
+diff --git a/machine-learning/Dockerfile b/machine-learning/Dockerfile
+index 6b11a4a..5ea18ee 100644
+--- a/machine-learning/Dockerfile
++++ b/machine-learning/Dockerfile
+@@ -28,6 +28,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends cmake git glslc
+     cd /opt/clipvit && \
+     CLIPVIT_GGML_TAG="${GGML_VERSION}" sh build.sh -DCLIPVIT_BUILD_CLI=OFF
+ 
++FROM builder-cpu AS builder-mnn
++
+ FROM builder-cpu AS builder-rknn
+ 
+ # Warning: 25GiB+ disk space required to pull this image
+@@ -125,6 +127,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends libvulkan1 mesa
+ 
+ COPY --from=builder-ggml /opt/clipvit/build/libclipvit.so /usr/lib/
+ 
++FROM prod-cpu AS prod-mnn
++
++ENV LD_PRELOAD=/usr/lib/libmimalloc.so.2 \
++    MACHINE_LEARNING_MODEL_ARENA=false \
++    MACHINE_LEARNING_MNN=true
++
+ FROM prod-cpu AS prod-rknn
+ 
+ # renovate: datasource=github-tags depName=airockchip/rknn-toolkit2
+diff --git a/machine-learning/README.md b/machine-learning/README.md
+index 3d1f09d..fe968e5 100644
+--- a/machine-learning/README.md
++++ b/machine-learning/README.md
+@@ -12,6 +12,10 @@ CUDA, ROCM and OpenVINO are supported as acceleration APIs. To use them, you can
+ To add or remove dependencies, you can use the commands `uv add $PACKAGE_NAME` and `uv remove $PACKAGE_NAME`, respectively.
+ Be sure to commit the `uv.lock` and `pyproject.toml` files with `uv lock` to reflect any changes in dependencies.
+ 
++# CPU inference with MNN
++
++The `-mnn` image (or `uv sync --extra mnn` plus `MACHINE_LEARNING_MNN=true`) runs the facial recognition models (and, with `MACHINE_LEARNING_MNN_TEXTUAL=true`, the CLIP text tower) on [MNN](https://github.com/alibaba/MNN)'s CPU backend instead of ONNX Runtime. Models are converted from the ONNX files on first load and cached next to them (`model.mnn` with fp16 weights, plus a `model.mnn.json` with the ONNX input/output signature); models that fail to convert fall back to ONNX Runtime. The arithmetic runs in fp32 by default (`MACHINE_LEARNING_MNN_PRECISION`), which is exact and, on Arm CPUs, 2-3x faster than ONNX Runtime for the face detector and recogniser at a fraction of the memory. fp16 arithmetic is faster still but MNN 3.6 returned wrong outputs for some inputs of the ArcFace and CLIP text models with it, so validate before enabling. CLIP image models and OCR stay on ONNX Runtime (or the ggml backend).
++
+ # Load Testing
+ 
+ To measure inference throughput and latency, you can use [Locust](https://locust.io/) using the provided `locustfile.py`.
+-- 
+2.55.0
+
