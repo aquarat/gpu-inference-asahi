@@ -1,0 +1,19 @@
+--- pass 1
+stock                        median 194.62 ms p95 200.95 min 175.59 max 206.49 | load+resize 676 ms | cpu 51.8 ms/iter  
+patched                      [hk] HK_PERFTEST active: 0x80 () [hk] HK_PERFTEST active: 0x80 () [hk] HK_PERFTEST active: 0x80 () [hk] HK_PERFTEST active: 0x80 () median 133.67 ms p95 149.97 min 95.37 max 175.39 | load+resize 680 ms | cpu 45.7 ms/iter  
+patched-nooverlap            [hk] HK_PERFTEST active: 0x100 (nooverlap) [hk] HK_PERFTEST active: 0x100 (nooverlap) [hk] HK_PERFTEST active: 0x100 (nooverlap) [hk] HK_PERFTEST active: 0x100 (nooverlap) median 140.20 ms p95 147.99 min 107.37 max 152.92 | load+resize 705 ms | cpu 48.0 ms/iter  
+patched-noconstdata          [hk] HK_PERFTEST active: 0x1080 (noconstdata) [hk] HK_PERFTEST active: 0x1080 (noconstdata) [hk] HK_PERFTEST active: 0x1080 (noconstdata) [hk] HK_PERFTEST active: 0x1080 (noconstdata) median 135.05 ms p95 147.41 min 103.35 max 153.01 | load+resize 1075 ms | cpu 45.2 ms/iter  
+patched-nooverlap-noconst    [hk] HK_PERFTEST active: 0x1100 (nooverlap,noconstdata) [hk] HK_PERFTEST active: 0x1100 (nooverlap,noconstdata) [hk] HK_PERFTEST active: 0x1100 (nooverlap,noconstdata) [hk] HK_PERFTEST active: 0x1100 (nooverlap,noconstdata) median 132.44 ms p95 148.81 min 113.52 max 150.81 | load+resize 1092 ms | cpu 48.3 ms/iter  
+--- pass 2
+stock                        median 220.30 ms p95 240.69 min 144.00 max 242.27 | load+resize 717 ms | cpu 48.1 ms/iter  
+patched                      [hk] HK_PERFTEST active: 0x80 () [hk] HK_PERFTEST active: 0x80 () [hk] HK_PERFTEST active: 0x80 () [hk] HK_PERFTEST active: 0x80 () median 156.72 ms p95 179.15 min 80.85 max 200.31 | load+resize 849 ms | cpu 36.0 ms/iter  
+patched-nooverlap            [hk] HK_PERFTEST active: 0x100 (nooverlap) [hk] HK_PERFTEST active: 0x100 (nooverlap) [hk] HK_PERFTEST active: 0x100 (nooverlap) [hk] HK_PERFTEST active: 0x100 (nooverlap) median 157.42 ms p95 182.38 min 115.80 max 190.93 | load+resize 730 ms | cpu 38.8 ms/iter  
+patched-noconstdata          [hk] HK_PERFTEST active: 0x1080 (noconstdata) [hk] HK_PERFTEST active: 0x1080 (noconstdata) [hk] HK_PERFTEST active: 0x1080 (noconstdata) [hk] HK_PERFTEST active: 0x1080 (noconstdata) median 136.01 ms p95 161.35 min 88.18 max 177.34 | load+resize 850 ms | cpu 36.8 ms/iter  
+patched-nooverlap-noconst    [hk] HK_PERFTEST active: 0x1100 (nooverlap,noconstdata) [hk] HK_PERFTEST active: 0x1100 (nooverlap,noconstdata) [hk] HK_PERFTEST active: 0x1100 (nooverlap,noconstdata) [hk] HK_PERFTEST active: 0x1100 (nooverlap,noconstdata) median 137.51 ms p95 150.75 min 109.11 max 150.80 | load+resize 672 ms | cpu 50.2 ms/iter  
+--- ViT-H fp16, patched nooverlap (1 warmup + 3 iters)
+               total        used        free      shared  buff/cache   available
+Mem:            15Gi       8.8Gi       3.2Gi       257Mi       4.4Gi       6.3Gi
+[hk] HK_PERFTEST active: 0x100 (nooverlap)
+RESULT type=7(resolved 7) prec=2 thr=4: median 5793.75 ms p95 6058.57 min 5762.14 max 6058.57 | load+resize 9643 ms | cpu 2748.4 ms/iter | mnn session mem 2405 MB | rss 94 MB
+139a3759d068b634dd10a15def0dbdd5  ~/frigate/research/vk-dispatch/results/clip_vith_patched_nooverlap_p2/embedding.bin
+ABL_DONE

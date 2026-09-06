@@ -1,0 +1,64 @@
+### ViT-H Vulkan Q8_0 + flash-attn
+shapes: RESULT backend=Vulkan0 fa=1 iters=3 median_ms=1738.1 min_ms=1736.4 mean_ms=1739.8 weights_MB=677 rss_MB=73 hwm_MB=73
+noise: RESULT backend=Vulkan0 fa=1 iters=3 median_ms=1766.9 min_ms=1759.9 mean_ms=1764.9 weights_MB=677 rss_MB=72 hwm_MB=72
+checker: RESULT backend=Vulkan0 fa=1 iters=3 median_ms=1764.6 min_ms=1762.4 mean_ms=1766.7 weights_MB=677 rss_MB=73 hwm_MB=73
+t1: RESULT backend=Vulkan0 fa=1 iters=3 median_ms=1756.5 min_ms=1754.6 mean_ms=1757.8 weights_MB=677 rss_MB=73 hwm_MB=73
+  cos shapes: 0.999380  maxabs 0.00549
+  cos noise: 0.999087  maxabs 0.00986
+  cos checker: 0.999233  maxabs 0.00409
+  cos t1: 0.998566  maxabs 0.00633
+  cos min 0.998566 mean 0.999066
+OVERALL vith14_q8_vk_fa median-of-medians: 1756.5 ms over 4 images
+backend: Vulkan0 (Apple M1 (G13G B1)) mem free 8118 MB / total 8118 MB
+graph: 822 nodes; unsupported on Vulkan0: none
+weights: 677.3 MB in Vulkan0 buffer, loaded in 144 ms
+### ViT-H Vulkan f16 weights, fp32 shader math (GGML_VK_DISABLE_F16=1), fa=1
+shapes: RESULT backend=Vulkan0 fa=1 iters=3 median_ms=3119.0 min_ms=3106.3 mean_ms=3116.9 weights_MB=1268 rss_MB=115 hwm_MB=115
+noise: RESULT backend=Vulkan0 fa=1 iters=3 median_ms=3123.2 min_ms=3113.8 mean_ms=3121.8 weights_MB=1268 rss_MB=70 hwm_MB=80
+checker: RESULT backend=Vulkan0 fa=1 iters=3 median_ms=3123.4 min_ms=3123.2 mean_ms=3124.2 weights_MB=1268 rss_MB=70 hwm_MB=78
+t1: RESULT backend=Vulkan0 fa=1 iters=3 median_ms=3115.7 min_ms=3112.7 mean_ms=3117.1 weights_MB=1268 rss_MB=69 hwm_MB=79
+  cos shapes: 0.999998  maxabs 0.00022
+  cos noise: 1.000000  maxabs 0.00004
+  cos checker: 1.000000  maxabs 0.00011
+  cos t1: 0.999991  maxabs 0.00050
+  cos min 0.999991 mean 0.999997
+OVERALL vith14_f16_vk_fa_nof16 median-of-medians: 3119.0 ms over 4 images
+backend: Vulkan0 (Apple M1 (G13G B1)) mem free 8118 MB / total 8118 MB
+graph: 822 nodes; unsupported on Vulkan0: none
+weights: 1268.3 MB in Vulkan0 buffer, loaded in 449 ms
+### test-backend-ops perf MUL_MAT on Vulkan0 (raw GEMM ceiling)
+MESA: error: Opening /dev/dri/card2 failed: Permission denied
+MESA: error: Opening /dev/dri/card1 failed: Permission denied
+Backend 1/2: Vulkan0
+  MUL_MAT(type_a=f16,type_b=f32,m=16416,n=1,k=128,bs=[8,1],nr=[4,1],per=[0,2,1,3],k_v=0,o=1,src_overlap=0):                      744 runs -  2095.99 us/run - 134.48 MFLOP/run - [1;34m 64.16 GFLOPS[0m
+  MUL_MAT(type_a=f16,type_b=f32,m=128,n=1,k=16416,bs=[8,1],nr=[4,1],per=[0,1,2,3],k_v=32832,o=1,src_overlap=0):                  744 runs -  6359.34 us/run - 134.48 MFLOP/run - [1;34m 21.15 GFLOPS[0m
+  MUL_MAT(type_a=f32,type_b=f32,m=4096,n=1,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0):                     852 runs -  7829.38 us/run - 117.44 MFLOP/run - [1;34m 15.00 GFLOPS[0m
+  MUL_MAT(type_a=f16,type_b=f32,m=4096,n=1,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0):                     852 runs -  9197.88 us/run - 117.44 MFLOP/run - [1;34m 12.77 GFLOPS[0m
+  MUL_MAT(type_a=q8_0,type_b=f32,m=4096,n=1,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0):                    852 runs -  2787.92 us/run - 117.44 MFLOP/run - [1;34m 42.12 GFLOPS[0m
+  MUL_MAT(type_a=f32,type_b=f32,m=4096,n=2,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0):                     426 runs -  5619.26 us/run - 234.88 MFLOP/run - [1;34m 41.80 GFLOPS[0m
+  MUL_MAT(type_a=f16,type_b=f32,m=4096,n=2,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0):                     426 runs -  2413.76 us/run - 234.88 MFLOP/run - [1;34m 97.31 GFLOPS[0m
+  MUL_MAT(type_a=q8_0,type_b=f32,m=4096,n=2,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0):                    852 runs -  2297.74 us/run - 234.88 MFLOP/run - [1;34m102.22 GFLOPS[0m
+  MUL_MAT(type_a=f32,type_b=f32,m=4096,n=3,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0):                     284 runs -  7597.40 us/run - 352.32 MFLOP/run - [1;34m 46.37 GFLOPS[0m
+  MUL_MAT(type_a=f16,type_b=f32,m=4096,n=3,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0):                     284 runs -  8019.76 us/run - 352.32 MFLOP/run - [1;34m 43.93 GFLOPS[0m
+  MUL_MAT(type_a=q8_0,type_b=f32,m=4096,n=3,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0):                    284 runs -  7987.71 us/run - 352.32 MFLOP/run - [1;34m 44.11 GFLOPS[0m
+### test-backend-ops perf MUL_MAT on CPU
+  MUL_MAT(type_a=f16,type_b=f32,m=16416,n=1,k=128,bs=[8,1],nr=[4,1],per=[0,2,1,3],k_v=0,o=1,src_overlap=0):                      600 runs -  1703.94 us/run - 134.48 MFLOP/run - [1;34m 78.92 GFLOPS[0m
+  MUL_MAT(type_a=f16,type_b=f32,m=128,n=1,k=16416,bs=[8,1],nr=[4,1],per=[0,1,2,3],k_v=32832,o=1,src_overlap=0):                  540 runs -  1868.07 us/run - 134.48 MFLOP/run - [1;34m 71.99 GFLOPS[0m
+  MUL_MAT(type_a=f32,type_b=f32,m=4096,n=1,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0):                     207 runs -  5611.35 us/run - 117.44 MFLOP/run - [1;34m 20.93 GFLOPS[0m
+  MUL_MAT(type_a=f16,type_b=f32,m=4096,n=1,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0):                     414 runs -  2868.28 us/run - 117.44 MFLOP/run - [1;34m 40.94 GFLOPS[0m
+  MUL_MAT(type_a=q8_0,type_b=f32,m=4096,n=1,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0):                    690 runs -  1565.97 us/run - 117.44 MFLOP/run - [1;34m 75.00 GFLOPS[0m
+  MUL_MAT(type_a=f32,type_b=f32,m=4096,n=2,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0):                     175 runs -  6680.87 us/run - 234.88 MFLOP/run - [1;34m 35.16 GFLOPS[0m
+  MUL_MAT(type_a=f16,type_b=f32,m=4096,n=2,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0):                     315 runs -  3200.81 us/run - 234.88 MFLOP/run - [1;34m 73.38 GFLOPS[0m
+  MUL_MAT(type_a=q8_0,type_b=f32,m=4096,n=2,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0):                    595 runs -  1791.93 us/run - 234.88 MFLOP/run - [1;34m131.08 GFLOPS[0m
+  MUL_MAT(type_a=f32,type_b=f32,m=4096,n=3,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0):                     184 runs -  6177.38 us/run - 352.32 MFLOP/run - [1;34m 57.03 GFLOPS[0m
+  MUL_MAT(type_a=f16,type_b=f32,m=4096,n=3,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0):                     345 runs -  3048.92 us/run - 352.32 MFLOP/run - [1;34m115.56 GFLOPS[0m
+  MUL_MAT(type_a=q8_0,type_b=f32,m=4096,n=3,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0):                    529 runs -  1892.56 us/run - 352.32 MFLOP/run - [1;34m186.16 GFLOPS[0m
+  MUL_MAT(type_a=f32,type_b=f32,m=4096,n=4,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0):                     180 runs -  5641.83 us/run - 469.76 MFLOP/run - [1;34m 83.26 GFLOPS[0m
+  MUL_MAT(type_a=f16,type_b=f32,m=4096,n=4,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0):                     324 runs -  3187.85 us/run - 469.76 MFLOP/run - [1;34m147.36 GFLOPS[0m
+  MUL_MAT(type_a=q8_0,type_b=f32,m=4096,n=4,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0):                    306 runs -  3314.53 us/run - 469.76 MFLOP/run - [1;34m141.73 GFLOPS[0m
+  MUL_MAT(type_a=f32,type_b=f32,m=4096,n=5,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0):                     182 runs -  5753.99 us/run - 587.20 MFLOP/run - [1;34m102.05 GFLOPS[0m
+  MUL_MAT(type_a=f16,type_b=f32,m=4096,n=5,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0):                     294 runs -  3525.54 us/run - 587.20 MFLOP/run - [1;34m166.56 GFLOPS[0m
+  MUL_MAT(type_a=q8_0,type_b=f32,m=4096,n=5,k=14336,bs=[1,1],nr=[1,1],per=[0,1,2,3],k_v=0,o=1,src_overlap=0):                    308 runs -  3342.67 us/run - 587.20 MFLOP/run - [1;34m175.67 GFLOPS[0m
+### frigate fallback / kernel GPU messages
+0
+CHAIN3_DONE

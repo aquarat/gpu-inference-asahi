@@ -1,0 +1,76 @@
+From 330e5653b0eb681bdf45334a0d7c942e4e84c106 Mon Sep 17 00:00:00 2001
+From: Aaron <blue@aquarat.co.uk>
+Date: Sun, 6 Sep 2026 10:24:14 +0100
+Subject: [PATCH] Vulkan: record the whole graph into one command buffer by
+ default (MNN_GPU_RECORD_BATCH)
+
+The Vulkan runtime only accepted six exact gpuMode values and defaulted to
+recording one VkCommandBuffer per op ("direct" mode). ScheduleConfig::mode
+shares its storage with numThread, so nearly every caller ends up with mode
+0x4 and therefore direct mode without knowing it. On drivers that turn each
+command buffer into its own GPU control stream (Mesa Honeykrisp on Apple AGX,
+and any driver without command-buffer merging) that costs a submit ioctl and
+a firmware round trip per op.
+
+YOLOv9-t 320 fp16 on an Apple M1 (Mesa 26.1.8 Honeykrisp), batch 1, one
+inference: 474 GPU control streams, ~610 DRM ioctls, 6.4 ms of CPU in
+queue_submit/memcpy, GPU idle 50% in ~23 us inter-stream gaps, 18.7 ms
+median. With MNN_GPU_RECORD_BATCH: 2-3 control streams, 0.6 ms CPU, GPU busy
+78%, 11.6 ms median (fp32: 21.2 -> 15.7 ms), output md5 identical.
+
+This change makes RECORD_BATCH the default for Vulkan whenever the caller did
+not set a record bit, keeps MNN_GPU_RECORD_OP as the explicit opt-in for the
+old per-op behaviour, and only validates the tuning bits (ignoring the
+OpenCL-only memory bits) instead of rejecting the whole mode.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VXX3uBLex4GVki947Lm5qV
+---
+ .../backend/vulkan/runtime/VulkanRuntime.cpp  | 30 ++++++++++++++-----
+ 1 file changed, 22 insertions(+), 8 deletions(-)
+
+diff --git a/source/backend/vulkan/runtime/VulkanRuntime.cpp b/source/backend/vulkan/runtime/VulkanRuntime.cpp
+index 676895f..5456eb2 100644
+--- a/source/backend/vulkan/runtime/VulkanRuntime.cpp
++++ b/source/backend/vulkan/runtime/VulkanRuntime.cpp
+@@ -113,15 +113,29 @@ VulkanRuntime::VulkanRuntime(const Backend::Info& info, std::shared_ptr<VulkanDe
+     mPipelineFactory = std::make_shared<VulkanPipelineFactory>(dev);
+     mQueryPool = std::make_shared<VulkanQueryPool>(dev);
+ 
+-    std::vector<int> legalModeValues = {0x00000001, 0x00000002, 0x00000004,
+-                                        0x00000201, 0x00000202, 0x00000204};
+-    auto iter = std::find(legalModeValues.begin(), legalModeValues.end(), (uint32_t)info.gpuMode);
+-    if (iter == legalModeValues.end()) {
+-        MNN_PRINT("The customized gpu mode is illegal for Vulkan backend. Using the default mode.\n");
+-        mGpuMode = 0x00000004;
+-    } else {
+-        mGpuMode = info.gpuMode;
++    // Only the tuning bits and the record bits matter for Vulkan; ignore the OpenCL-only
++    // memory / buffer bits instead of rejecting the whole mode.
++    int tuning = info.gpuMode & (MNN_GPU_TUNING_NONE | MNN_GPU_TUNING_HEAVY | MNN_GPU_TUNING_WIDE);
++    int record = info.gpuMode & (MNN_GPU_RECORD_OP | MNN_GPU_RECORD_BATCH);
++    if (tuning != MNN_GPU_TUNING_NONE && tuning != MNN_GPU_TUNING_HEAVY && tuning != MNN_GPU_TUNING_WIDE) {
++        if (0 != tuning) {
++            MNN_PRINT("The customized gpu tuning mode is illegal for Vulkan backend. Using the default mode.\n");
++        }
++        tuning = MNN_GPU_TUNING_WIDE;
++    }
++    // Default to recording the whole graph into one command buffer (MNN_GPU_RECORD_BATCH).
++    // One VkCommandBuffer per op (MNN_GPU_RECORD_OP) makes drivers that turn every command
++    // buffer into a separate GPU control stream (Mesa Honeykrisp / Apple AGX, and others)
++    // leave the GPU idle between ops: YOLOv9-t 320 fp16 on an M1 went from 474 control
++    // streams, 50% GPU idle and 6.4 ms of CPU per inference to 3 streams, 78% busy and
++    // 0.6 ms of CPU, 18.7 ms -> 11.6 ms, with bit-identical output. Callers that need the
++    // per-op command buffers can still ask for MNN_GPU_RECORD_OP explicitly.
++    if (0 == record) {
++        record = MNN_GPU_RECORD_BATCH;
++    } else if (record & MNN_GPU_RECORD_OP) {
++        record = 0;
+     }
++    mGpuMode = tuning | record;
+ }
+ 
+ VulkanRuntime::~VulkanRuntime() {
+-- 
+2.55.0
+

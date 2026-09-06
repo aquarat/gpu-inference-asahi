@@ -1,0 +1,438 @@
+From 1b00e9bdd36bb3f3aa56aa6720310093de762b60 Mon Sep 17 00:00:00 2001
+From: Aaron <blue@aquarat.co.uk>
+Date: Sun, 6 Sep 2026 10:24:14 +0100
+Subject: [PATCH 1/2] Fuse Swish/SiLU into Convolution (activation_type 7) and
+ recover x*sigmoid(x) patterns in ncnnoptimize
+
+YOLO-family models (SiLU everywhere) currently keep one Swish layer per
+convolution on every backend, and onnx2ncnn only recognises x*sigmoid(x) when
+the convolution output has a single consumer, so a quarter of the SiLUs survive
+as Split + Sigmoid + BinaryOp(MUL) (three dispatches and two barriers on Vulkan).
+
+* activation_type 7 = swish (x * sigmoid(x)) in fused_activation.h (scalar and
+  the create_activation_layer fallback -> Swish layer), in the arm/x86/loongarch/
+  mips/riscv vector activation helpers (all of which already had swish/sigmoid
+  helpers) and in vulkan_activation.comp.
+* ncnnoptimize: new pass fuse_split_sigmoid_mul_swish() turns
+  x -> Split -> {a, b}; Sigmoid(b); Mul(a, sigmoid) into Swish(x), and the
+  Convolution / ConvolutionDepthWise / InnerProduct activation fusions accept
+  Swish (-> activation_type 7).
+
+YOLOv9-t 320 (fox-person-cat, 655 layers): the optimised graph shrinks to 388
+layers (179 convolutions carry 9=7, 44 Split+Sigmoid+Mul triples removed).
+On an Apple M1 (Mesa Honeykrisp Vulkan) that is 978 -> ~740 dispatches and
+~2020 -> ~1680 barriers per inference; Vulkan fp16 29.0 -> 25.2 ms and fp32
+33.8 -> 30.2 ms in the same (noisy) pass. Output is unchanged within fp16
+rounding: fp32 Vulkan max|diff| vs onnxruntime 0.0016 (0.0021 before), fp32
+NEON CPU 0.0015; fp16 differs from the unfused fp16 graph by the rounding of
+the fused epilogue only.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VXX3uBLex4GVki947Lm5qV
+---
+ src/layer/arm/arm_activation.h                |  16 +++
+ src/layer/fused_activation.h                  |  15 +++
+ src/layer/loongarch/loongarch_activation.h    |   8 ++
+ src/layer/mips/mips_activation.h              |   4 +
+ src/layer/riscv/riscv_activation.h            |   4 +
+ .../vulkan/shader/vulkan_activation.comp      |  10 ++
+ src/layer/x86/x86_activation.h                |  12 ++
+ tools/ncnnoptimize.cpp                        | 124 +++++++++++++++++-
+ 8 files changed, 190 insertions(+), 3 deletions(-)
+
+diff --git a/src/layer/arm/arm_activation.h b/src/layer/arm/arm_activation.h
+index 32e8944..a0a5fb3 100644
+--- a/src/layer/arm/arm_activation.h
++++ b/src/layer/arm/arm_activation.h
+@@ -52,6 +52,10 @@ static inline float32x4_t activation_ps(float32x4_t _v, int activation_type, con
+         _ans = vminq_f32(_ans, _one);
+         _v = vmulq_f32(_ans, _v);
+     }
++    else if (activation_type == 7)
++    {
++        _v = vmulq_f32(_v, sigmoid_ps(_v));
++    }
+ 
+     return _v;
+ }
+@@ -101,6 +105,10 @@ static inline __fp16 activation_ss_f16(__fp16 v, int activation_type, const ncnn
+         else
+             v = v * (v * alpha + beta);
+     }
++    else if (activation_type == 7)
++    {
++        v = v / ((__fp16)1.f + (__fp16)expf(-v));
++    }
+ 
+     return v;
+ }
+@@ -147,6 +155,10 @@ static inline float16x4_t activation_ps_f16(float16x4_t _v, int activation_type,
+         _ans = vmin_f16(_ans, _one);
+         _v = vmul_f16(_ans, _v);
+     }
++    else if (activation_type == 7)
++    {
++        _v = vmul_f16(_v, sigmoid_ps_f16(_v));
++    }
+ 
+     return _v;
+ }
+@@ -193,6 +205,10 @@ static inline float16x8_t activation_ps_f16(float16x8_t _v, int activation_type,
+         _ans = vminq_f16(_ans, _one);
+         _v = vmulq_f16(_ans, _v);
+     }
++    else if (activation_type == 7)
++    {
++        _v = vmulq_f16(_v, sigmoid_ps_f16(_v));
++    }
+     return _v;
+ }
+ #endif // __ARM_FEATURE_FP16_VECTOR_ARITHMETIC
+diff --git a/src/layer/fused_activation.h b/src/layer/fused_activation.h
+index c1d6647..e0d3104 100644
+--- a/src/layer/fused_activation.h
++++ b/src/layer/fused_activation.h
+@@ -58,6 +58,14 @@ static NCNN_FORCEINLINE float activation_ss(float v, int activation_type, const
+             v = v * (v * alpha + beta);
+         break;
+     }
++    case 7:
++    {
++        // swish / silu: x * sigmoid(x)
++        float t = std::min(v, 88.3762626647949f);
++        t = std::max(t, -88.3762626647949f);
++        v = v / (1.f + expf(-t));
++        break;
++    }
+     }
+ 
+     return v;
+@@ -116,6 +124,13 @@ static ncnn::Layer* create_activation_layer(int activation_type, const ncnn::Mat
+ 
+         activation->load_param(pd);
+     }
++    else if (activation_type == 7)
++    {
++        activation = ncnn::create_layer_cpu(ncnn::LayerType::Swish);
++
++        ncnn::ParamDict pd;
++        activation->load_param(pd);
++    }
+ 
+     if (activation)
+     {
+diff --git a/src/layer/loongarch/loongarch_activation.h b/src/layer/loongarch/loongarch_activation.h
+index b0bbd57..c948783 100644
+--- a/src/layer/loongarch/loongarch_activation.h
++++ b/src/layer/loongarch/loongarch_activation.h
+@@ -104,6 +104,10 @@ static NCNN_FORCEINLINE __m128 activation_lsx(__m128 _v, int activation_type, co
+         __m128 _b = (__m128)__lsx_vreplfr2vr_s(activation_params[1]);
+         return hardswish_lsx(_v, _a, _b);
+     }
++    case 7:
++    {
++        return swish_lsx(_v);
++    }
+     }
+ 
+     return _v;
+@@ -208,6 +212,10 @@ static NCNN_FORCEINLINE __m256 activation_lasx(__m256 _v, int activation_type, c
+         __m256 _b = (__m256)__lasx_xvreplfr2vr_s(activation_params[1]);
+         return hardswish_lasx(_v, _a, _b);
+     }
++    case 7:
++    {
++        return swish_lasx(_v);
++    }
+     }
+ 
+     return _v;
+diff --git a/src/layer/mips/mips_activation.h b/src/layer/mips/mips_activation.h
+index d347479..65ae7c8 100644
+--- a/src/layer/mips/mips_activation.h
++++ b/src/layer/mips/mips_activation.h
+@@ -104,6 +104,10 @@ static NCNN_FORCEINLINE v4f32 activation_msa(v4f32 _v, int activation_type, cons
+         v4f32 _b = (v4f32)__msa_fill_w_f32(activation_params[1]);
+         return hardswish_msa(_v, _a, _b);
+     }
++    case 7:
++    {
++        return swish_msa(_v);
++    }
+     }
+ 
+     return _v;
+diff --git a/src/layer/riscv/riscv_activation.h b/src/layer/riscv/riscv_activation.h
+index 5cf84ed..09abfe8 100644
+--- a/src/layer/riscv/riscv_activation.h
++++ b/src/layer/riscv/riscv_activation.h
+@@ -51,6 +51,10 @@
+                                                                                                                                                                               \
+             vfloat##SEW##m##LMUL##_t _p0 = __riscv_vfadd_vf_f##SEW##m##LMUL##_m(_apply, __riscv_vfmul_vf_f##SEW##m##LMUL##_m(_apply, _v, (STYPE)alpha, vl), (STYPE)beta, vl); \
+             _v = __riscv_vfmul_vv_f##SEW##m##LMUL##_mu(_apply, _v, _v, _p0, vl);                                                                                              \
++        }                                                                                                                                                                     \
++        else if (activation_type == 7)                                                                                                                                        \
++        {                                                                                                                                                                     \
++            _v = __riscv_vfmul_vv_f##SEW##m##LMUL(_v, sigmoid_ps(_v, vl), vl);                                                                                                \
+         }                                                                                                                                                                     \
+                                                                                                                                                                               \
+         return _v;                                                                                                                                                            \
+diff --git a/src/layer/vulkan/shader/vulkan_activation.comp b/src/layer/vulkan/shader/vulkan_activation.comp
+index 60ebe53..c793760 100644
+--- a/src/layer/vulkan/shader/vulkan_activation.comp
++++ b/src/layer/vulkan/shader/vulkan_activation.comp
+@@ -39,6 +39,11 @@ afp activation_afp(afp v, int activation_type, float activation_param_0, float a
+         const afp beta = afp(activation_param_1);
+         v = v * clamp(v * afp(alpha) + afp(beta), afp(0.f), afp(1.f));
+     }
++    if (activation_type == 7)
++    {
++        // swish / silu: x * sigmoid(x)
++        v = v / (afp(1.f) + exp(-v));
++    }
+ 
+     return v;
+ }
+@@ -78,6 +83,11 @@ afpvec4 activation_afpvec4(afpvec4 v, int activation_type, float activation_para
+         const afp beta = afp(activation_param_1);
+         v = v * clamp(v * afp(alpha) + afp(beta), afp(0.f), afp(1.f));
+     }
++    if (activation_type == 7)
++    {
++        // swish / silu: x * sigmoid(x)
++        v = v / (afp(1.f) + exp(-v));
++    }
+ 
+     return v;
+ }
+diff --git a/src/layer/x86/x86_activation.h b/src/layer/x86/x86_activation.h
+index 257cb47..a800448 100644
+--- a/src/layer/x86/x86_activation.h
++++ b/src/layer/x86/x86_activation.h
+@@ -103,6 +103,10 @@ static NCNN_FORCEINLINE __m128 activation_sse(__m128 _v, int activation_type, co
+         __m128 _b = _mm_set1_ps(activation_params[1]);
+         return hardswish_sse(_v, _a, _b);
+     }
++    case 7:
++    {
++        return swish_sse(_v);
++    }
+     }
+ 
+     return _v;
+@@ -207,6 +211,10 @@ static NCNN_FORCEINLINE __m256 activation_avx(__m256 _v, int activation_type, co
+         __m256 _b = _mm256_set1_ps(activation_params[1]);
+         return hardswish_avx(_v, _a, _b);
+     }
++    case 7:
++    {
++        return swish_avx(_v);
++    }
+     }
+ 
+     return _v;
+@@ -305,6 +313,10 @@ static NCNN_FORCEINLINE __m512 activation_avx512(__m512 _v, int activation_type,
+         __m512 _b = _mm512_set1_ps(activation_params[1]);
+         return hardswish_avx512(_v, _a, _b);
+     }
++    case 7:
++    {
++        return swish_avx512(_v);
++    }
+     }
+ 
+     return _v;
+diff --git a/tools/ncnnoptimize.cpp b/tools/ncnnoptimize.cpp
+index f4f1110..3f9ad03 100644
+--- a/tools/ncnnoptimize.cpp
++++ b/tools/ncnnoptimize.cpp
+@@ -53,6 +53,7 @@ public:
+     int fuse_innerproduct_batchnorm();
+     int fuse_innerproduct_add();
+     int fuse_innerproduct_dropout();
++    int fuse_split_sigmoid_mul_swish();
+     int fuse_convolution_activation();
+     int fuse_convolutiondepthwise_activation();
+     int fuse_deconvolution_activation();
+@@ -1265,6 +1266,110 @@ int NetOptimize::fuse_innerproduct_dropout()
+     return 0;
+ }
+ 
++int NetOptimize::fuse_split_sigmoid_mul_swish()
++{
++    // x -> Split -> {a, b}; Sigmoid(b) -> s; BinaryOp MUL(a, s) -> y   ==>   Swish(x) -> y
++    // onnx2ncnn only recognises x*sigmoid(x) when the conv output is not shared, so YOLO-style
++    // graphs keep ~1/4 of their SiLU activations as Split+Sigmoid+Mul (3 dispatches + 2 barriers).
++    const size_t layer_count = layers.size();
++    const size_t blob_count = blobs.size();
++
++    // count consumers of each blob
++    std::vector<int> consumers(blob_count, 0);
++    for (size_t i = 0; i < layer_count; i++)
++    {
++        for (size_t k = 0; k < layers[i]->bottoms.size(); k++)
++        {
++            consumers[layers[i]->bottoms[k]]++;
++        }
++    }
++
++    for (size_t i = 0; i < layer_count; i++)
++    {
++        if (layers[i]->type != "BinaryOp")
++            continue;
++
++        if (layers[i]->bottoms.size() != 2)
++            continue;
++
++        ncnn::BinaryOp* binaryop = (ncnn::BinaryOp*)layers[i];
++
++        if (binaryop->op_type != ncnn::BinaryOp::Operation_MUL)
++            continue;
++
++        if (binaryop->with_scalar)
++            continue;
++
++        int b0 = binaryop->bottoms[0];
++        int b1 = binaryop->bottoms[1];
++
++        // one input comes from Sigmoid
++        int sigmoid_index = -1;
++        int a = -1;
++        for (int t = 0; t < 2; t++)
++        {
++            int sb = t == 0 ? b1 : b0;
++            int p = blobs[sb].producer;
++            if (p < 0 || p >= (int)layer_count)
++                continue;
++            if (layers[p]->type != "Sigmoid")
++                continue;
++            if (layers[p]->bottoms.size() != 1 || layers[p]->tops.size() != 1)
++                continue;
++            if (consumers[sb] != 1)
++                continue;
++            sigmoid_index = p;
++            a = t == 0 ? b0 : b1;
++            break;
++        }
++        if (sigmoid_index == -1)
++            continue;
++
++        ncnn::Layer* sigmoid = layers[sigmoid_index];
++        int b = sigmoid->bottoms[0];
++
++        // a and b must be the two outputs of the same Split
++        int split_index = blobs[a].producer;
++        if (split_index < 0 || split_index >= (int)layer_count)
++            continue;
++        if (layers[split_index]->type != "Split")
++            continue;
++        if (blobs[b].producer != split_index)
++            continue;
++        if (layers[split_index]->tops.size() != 2)
++            continue;
++        if (consumers[a] != 1 || consumers[b] != 1)
++            continue;
++
++        ncnn::Layer* split = layers[split_index];
++        int x = split->bottoms[0];
++
++        fprintf(stderr, "fuse_split_sigmoid_mul_swish %s %s %s\n", split->name.c_str(), sigmoid->name.c_str(), binaryop->name.c_str());
++
++        ncnn::Layer* swish = ncnn::create_layer_cpu("Swish");
++
++        swish->type = "Swish";
++        swish->name = binaryop->name;
++        swish->bottoms.resize(1);
++        swish->bottoms[0] = x;
++        swish->tops = binaryop->tops;
++
++        ncnn::ParamDict pd;
++        swish->load_param(pd);
++
++        blobs[x].consumer = (int)i;
++        blobs[swish->tops[0]].producer = (int)i;
++
++        split->type = "ncnnfused";
++        sigmoid->type = "ncnnfused";
++
++        layers[i] = swish;
++        delete binaryop;
++    }
++
++    return 0;
++}
++
+ int NetOptimize::fuse_convolution_activation()
+ {
+     const size_t layer_count = layers.size();
+@@ -1279,7 +1384,7 @@ int NetOptimize::fuse_convolution_activation()
+         size_t j = i + 1;
+         for (; j < layer_count; j++)
+         {
+-            if (layers[j]->type != "ReLU" && layers[j]->type != "Clip" && layers[j]->type != "Sigmoid" && layers[j]->type != "Mish" && layers[j]->type != "HardSwish")
++            if (layers[j]->type != "ReLU" && layers[j]->type != "Clip" && layers[j]->type != "Sigmoid" && layers[j]->type != "Mish" && layers[j]->type != "HardSwish" && layers[j]->type != "Swish")
+                 continue;
+ 
+             if (layers[j]->bottoms.size() != 1)
+@@ -1339,6 +1444,10 @@ int NetOptimize::fuse_convolution_activation()
+             convolution->activation_params[0] = hardswish->alpha;
+             convolution->activation_params[1] = hardswish->beta;
+         }
++        else if (activation->type == "Swish")
++        {
++            convolution->activation_type = 7;
++        }
+ 
+         int top_blob_index_final = activation->tops[0];
+         convolution->tops[0] = top_blob_index_final;
+@@ -1432,7 +1541,7 @@ int NetOptimize::fuse_convolutiondepthwise_activation()
+         size_t j = i + 1;
+         for (; j < layer_count; j++)
+         {
+-            if (layers[j]->type != "ReLU" && layers[j]->type != "Clip" && layers[j]->type != "Sigmoid" && layers[j]->type != "Mish" && layers[j]->type != "HardSwish")
++            if (layers[j]->type != "ReLU" && layers[j]->type != "Clip" && layers[j]->type != "Sigmoid" && layers[j]->type != "Mish" && layers[j]->type != "HardSwish" && layers[j]->type != "Swish")
+                 continue;
+ 
+             if (layers[j]->bottoms.size() != 1)
+@@ -1492,6 +1601,10 @@ int NetOptimize::fuse_convolutiondepthwise_activation()
+             convolutiondepthwise->activation_params[0] = hardswish->alpha;
+             convolutiondepthwise->activation_params[1] = hardswish->beta;
+         }
++        else if (activation->type == "Swish")
++        {
++            convolutiondepthwise->activation_type = 7;
++        }
+ 
+         int top_blob_index_final = activation->tops[0];
+         convolutiondepthwise->tops[0] = top_blob_index_final;
+@@ -1658,7 +1771,7 @@ int NetOptimize::fuse_innerproduct_activation()
+         size_t j = i + 1;
+         for (; j < layer_count; j++)
+         {
+-            if (layers[j]->type != "ReLU" && layers[j]->type != "Clip" && layers[j]->type != "Sigmoid" && layers[j]->type != "Mish" && layers[j]->type != "HardSwish")
++            if (layers[j]->type != "ReLU" && layers[j]->type != "Clip" && layers[j]->type != "Sigmoid" && layers[j]->type != "Mish" && layers[j]->type != "HardSwish" && layers[j]->type != "Swish")
+                 continue;
+ 
+             if (layers[j]->bottoms.size() != 1)
+@@ -1718,6 +1831,10 @@ int NetOptimize::fuse_innerproduct_activation()
+             innerproduct->activation_params[0] = hardswish->alpha;
+             innerproduct->activation_params[1] = hardswish->beta;
+         }
++        else if (activation->type == "Swish")
++        {
++            innerproduct->activation_type = 7;
++        }
+ 
+         int top_blob_index_final = activation->tops[0];
+         innerproduct->tops[0] = top_blob_index_final;
+@@ -2819,6 +2936,7 @@ int main(int argc, char** argv)
+     optimizer.replace_reduction_with_global_pooling();
+     optimizer.replace_prelu_with_leaky_relu();
+ 
++    optimizer.fuse_split_sigmoid_mul_swish();
+     optimizer.fuse_convolution_activation();
+     optimizer.fuse_convolutiondepthwise_activation();
+     optimizer.fuse_deconvolution_activation();
+-- 
+2.55.0
+

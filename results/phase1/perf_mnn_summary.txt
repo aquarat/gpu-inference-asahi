@@ -1,0 +1,46 @@
+### perf MNN vulkan fp16 mode=0x4 (no-children, top symbols)
+    12.27%  bench_mnn2_stoc  libMNN.so              [.] MNN::Math::Matrix::multi(MNN::Tensor*, MNN::Tensor const*, MNN::Tensor const*)
+     8.90%  bench_mnn2_stoc  libc.so.6              [.] __memcpy_generic
+     8.13%  bench_mnn2_stoc  libexpat.so.1.12.1     [.] normal_getAtts.lto_priv.0
+     6.30%  bench_mnn2_stoc  ld-linux-aarch64.so.1  [.] _dl_lookup_symbol_x
+     5.93%  bench_mnn2_stoc  ld-linux-aarch64.so.1  [.] do_lookup_x
+     4.98%  bench_mnn2_stoc  libexpat.so.1.12.1     [.] normal_contentTok.lto_priv.0
+     4.97%  bench_mnn2_stoc  ld-linux-aarch64.so.1  [.] _dl_relocate_object_no_relro
+     4.94%  bench_mnn2_stoc  libexpat.so.1.12.1     [.] normal_updatePosition.lto_priv.0
+     3.87%  bench_mnn2_stoc  libMNN.so              [.] MNN::Pipeline::execute()
+     3.37%  bench_mnn2_stoc  ld-linux-aarch64.so.1  [.] strcmp
+     2.47%  bench_mnn2_stoc  libMNN.so              [.] MNN::Math::WinogradGenerater::transformWeight(MNN::Tensor const*, MNN::Tensor const*, bool)
+     2.25%  bench_mnn2_stoc  libvulkan_asahi.so     [.] queue_submit
+     2.12%  bench_mnn2_stoc  libc.so.6              [.] cfree@GLIBC_2.17
+     1.75%  bench_mnn2_stoc  libexpat.so.1.12.1     [.] sip24_final
+     1.57%  bench_mnn2_stoc  libexpat.so.1.12.1     [.] accountingDiffTolerated.part.0.lto_priv.0
+    30.57%  bench_mnn2_stoc  libc.so.6              [.] __memcpy_generic
+    18.37%  bench_mnn2_stoc  libvulkan_asahi.so     [.] queue_submit
+    15.08%  bench_mnn2_stoc  libMNN.so              [.] MNN::VulkanBasicExecutionDirect::onExecute(std::vector<MNN::Tensor*, std::allocator<MNN::Tensor*> > const&, std::vector<MNN::Tensor*, std::allocator<MNN::Tensor*> > const&)
+     3.58%  bench_mnn2_stoc  libvulkan_asahi.so     [.] vk_drm_syncobj_init
+     2.33%  bench_mnn2_stoc  libvulkan_asahi.so     [.] queue_submit_single.isra.0
+     2.05%  bench_mnn2_stoc  libMNN.so              [.] MNN::Pipeline::execute()
+     1.99%  bench_mnn2_stoc  libvulkan_asahi.so     [.] vk_queue_submit_create
+### perf MNN vulkan fp16 mode=0x204 (no-children, top symbols)
+    11.31%  bench_mnn2_stoc  ld-linux-aarch64.so.1   [.] do_lookup_x
+    10.72%  bench_mnn2_stoc  libMNN.so               [.] MNN::Math::Matrix::multi(MNN::Tensor*, MNN::Tensor const*, MNN::Tensor const*)
+     5.18%  bench_mnn2_stoc  libexpat.so.1.12.1      [.] normal_updatePosition.lto_priv.0
+     3.86%  bench_mnn2_stoc  ld-linux-aarch64.so.1   [.] strcmp
+     3.54%  bench_mnn2_stoc  ld-linux-aarch64.so.1   [.] _dl_lookup_symbol_x
+     3.26%  bench_mnn2_stoc  libexpat.so.1.12.1      [.] sip24_final
+     3.21%  bench_mnn2_stoc  ld-linux-aarch64.so.1   [.] _dl_relocate_object_no_relro
+     3.12%  bench_mnn2_stoc  libexpat.so.1.12.1      [.] normal_contentTok.lto_priv.0
+     2.53%  bench_mnn2_stoc  libexpat.so.1.12.1      [.] normal_getAtts.lto_priv.0
+     2.33%  bench_mnn2_stoc  libexpat.so.1.12.1      [.] sip24_update.isra.0
+     2.13%  bench_mnn2_stoc  libc.so.6               [.] strcmp
+     1.99%  bench_mnn2_stoc  libexpat.so.1.12.1      [.] normal_nameLength.lto_priv.0
+     1.90%  bench_mnn2_stoc  libc.so.6               [.] _int_malloc
+     1.88%  bench_mnn2_stoc  libc.so.6               [.] __memcpy_generic
+     1.80%  bench_mnn2_stoc  libexpat.so.1.12.1      [.] utf8_toUtf8.lto_priv.0
+    23.67%  bench_mnn2_stoc  libc.so.6              [.] __memcpy_generic
+    13.62%  bench_mnn2_stoc  libMNN.so              [.] MNN::Math::Matrix::multi(MNN::Tensor*, MNN::Tensor const*, MNN::Tensor const*)
+     4.17%  bench_mnn2_stoc  libMNN.so              [.] MNN::VulkanBasicExecutionInDirect::onExecute(std::vector<MNN::Tensor*, std::allocator<MNN::Tensor*> > const&, std::vector<MNN::Tensor*, std::allocator<MNN::Tensor*> > const&)
+     3.16%  bench_mnn2_stoc  libMNN.so              [.] MNN::Math::WinogradGenerater::transformWeight(MNN::Tensor const*, MNN::Tensor const*, bool)
+     2.53%  bench_mnn2_stoc  libc.so.6              [.] cfree@GLIBC_2.17
+     1.92%  bench_mnn2_stoc  libvulkan_asahi.so     [.] blake3_compress_in_place_portable
+     1.86%  bench_mnn2_stoc  libvulkan_asahi.so     [.] hk_reset_cmd_buffer

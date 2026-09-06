@@ -1,0 +1,9 @@
+connecting to tcp://127.0.0.1:5556
+model_request reply: {'model_available': True, 'model_loaded': True, 'model_name': 'fox-person-cat-320.onnx', 'message': 'Model fox-person-cat-320.onnx loaded successfully'}
+
+last result shape=(20, 6) dtype=float32
+rows: [class_id, score, y_min, x_min, y_max, x_max]
+  (no detections above threshold - expected for random/zero input)
+
+20 requests ok, 0 timeouts, 0 error replies, 0.7 s, 28.6 req/s
+round-trip latency: avg=34.90 ms  min=29.18  p50=34.39  p95=38.70  p99=41.12  max=41.72

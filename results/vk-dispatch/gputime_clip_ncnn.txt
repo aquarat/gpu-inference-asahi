@@ -1,0 +1,28 @@
+### vitb32 fp16 patched default
+[hk gputime]   dispatch origin: app 910, meta 0, gs/prerast 0, tess 0, precomp 0  (recorded 910)
+[hk gputime]   4762 dispatches (1.7/cmd, 87.9 us each)  0 draws
+[hk gputime]   pipeline barriers 1488 (0.0/frame): 372 compute-only (0.0/frame ending real work), 0 compute-only but gfx open, 1116 need the hammer
+[hk gputime]   GPU busy (union) 418.7 ms = 41.8% of wall
+[hk gputime]   GPU idle 582.8 ms in 2850 gaps (0.0/frame, largest 4232 us)
+RESULT type=7(resolved 7) prec=2 thr=4: median 140.09 ms p95 161.56 min 112.11 max 161.85 | load+resize 1097 ms | cpu 48.7 ms/iter | mnn session mem 178 MB | rss 369 MB
+### vitb32 fp16 patched nooverlap
+[hk gputime]   dispatch origin: app 925, meta 0, gs/prerast 0, tess 0, precomp 0  (recorded 925)
+[hk gputime]   4840 dispatches (1.7/cmd, 83.5 us each)  0 draws
+[hk gputime]   pipeline barriers 1508 (0.0/frame): 377 compute-only (0.0/frame ending real work), 0 compute-only but gfx open, 1131 need the hammer
+[hk gputime]   GPU busy (union) 404.2 ms = 40.2% of wall
+[hk gputime]   GPU idle 598.7 ms in 2898 gaps (0.0/frame, largest 4903 us)
+RESULT type=7(resolved 7) prec=2 thr=4: median 139.19 ms p95 154.29 min 112.85 max 158.54 | load+resize 678 ms | cpu 47.1 ms/iter | mnn session mem 178 MB | rss 373 MB
+### ncnn yolo fp16 patched default (bench_ncnn_cpp, Fedora libncnn; teardown segfault expected)
+[hk gputime]   36186 dispatches (978.0/cmd, 19.9 us each)  0 draws
+[hk gputime]   pipeline barriers 72076 (0.0/frame): 72002 compute-only (0.0/frame ending real work), 0 compute-only but gfx open, 74 need the hammer
+[hk gputime]   GPU busy (union) 718.8 ms = 66.1% of wall
+[hk gputime]   GPU idle 356.0 ms in 36 gaps (0.0/frame, largest 15199 us)
+[hk gputime]   driver helper kernels: 1739 dispatches (0.0/frame) across 1 kernels
+ncnn_models/fox-person-cat-320 gpu=1 fp16=1 threads=4: mean 28.71 ms median 28.58 p95 33.77 min 22.92 -> 35.0 fps (out 2100x8x1)
+### ncnn yolo fp16 patched nooverlap
+[hk gputime]   35208 dispatches (978.0/cmd, 19.9 us each)  0 draws
+[hk gputime]   pipeline barriers 70128 (0.0/frame): 70056 compute-only (0.0/frame ending real work), 0 compute-only but gfx open, 72 need the hammer
+[hk gputime]   GPU busy (union) 698.9 ms = 67.0% of wall
+[hk gputime]   GPU idle 334.3 ms in 35 gaps (0.0/frame, largest 14528 us)
+[hk gputime]   driver helper kernels: 1692 dispatches (0.0/frame) across 1 kernels
+ncnn_models/fox-person-cat-320 gpu=1 fp16=1 threads=4: mean 28.49 ms median 28.49 p95 33.22 min 23.01 -> 35.1 fps (out 2100x8x1)

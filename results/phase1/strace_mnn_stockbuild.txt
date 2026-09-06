@@ -1,0 +1,26 @@
+### strace ioctl count, MNN vulkan fp16 mode=0x4, 10 warm + 100 iters
+strace: Process 1311395 attached
+strace: Process 1311419 attached
+strace: Process 1311438 attached
+strace: Process 1311456 attached
+strace: Process 1311458 attached
+MNN type=7 prec=2 mode=0x4: median 22.59 ms p95 39.99 min 19.42 max 54.98 -> 44.3 fps | cpu 8.91 ms/iter | wall 25.2 ms/iter (out 16800 elems)
+% time     seconds  usecs/call     calls    errors syscall
+------ ----------- ----------- --------- --------- ----------------
+ 56.81    1.141097       13424        85         2 futex
+ 43.19    0.867628          12     67097           ioctl
+------ ----------- ----------- --------- --------- ----------------
+100.00    2.008725          29     67182         2 total
+### strace ioctl count, MNN vulkan fp16 mode=0x204, 10 warm + 100 iters
+strace: Process 1311660 attached
+strace: Process 1311667 attached
+strace: Process 1311669 attached
+strace: Process 1311671 attached
+strace: Process 1311673 attached
+MNN type=7 prec=2 mode=0x204: median 15.52 ms p95 33.08 min 13.58 max 37.44 -> 64.4 fps | cpu 0.82 ms/iter | wall 17.6 ms/iter (out 16800 elems)
+% time     seconds  usecs/call     calls    errors syscall
+------ ----------- ----------- --------- --------- ----------------
+ 70.36    0.344574        3960        87         2 futex
+ 29.64    0.145139          10     14210           ioctl
+------ ----------- ----------- --------- --------- ----------------
+100.00    0.489713          34     14297         2 total

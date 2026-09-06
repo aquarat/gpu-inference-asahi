@@ -1,0 +1,48 @@
+### stock pass1 prec1 :: env ./mnnrun/mnnrun ~/immich-ml/models/mnn/clip_ViT-B-32__openai_visual.mnn 7 1 4 3 20 ~/frigate/research/vk-dispatch/results/clip_vitb32_stock_p1_pass1 image=ref/vitb32_buffalo/clip_visual_input.bin:f32:1x3x224x224
+RESULT type=7(resolved 7) prec=1 thr=4: median 216.37 ms p95 242.29 min 205.29 max 242.29 | load+resize 1196 ms | cpu 51.9 ms/iter | mnn session mem 360 MB | rss 399 MB
+clip_visual_ref.npy          <- embedding  cos 0.999986  max|diff| 0.00107  mean|diff| 0.000182  ref range [-0.634,0.116]
+a64b3d9f023bc8e21874aaccfcddfcde  ~/frigate/research/vk-dispatch/results/clip_vitb32_stock_p1_pass1/embedding.bin
+### patched pass1 prec1 :: ~/frigate/research/vk-dispatch/with-patched.sh ./mnnrun/mnnrun ~/immich-ml/models/mnn/clip_ViT-B-32__openai_visual.mnn 7 1 4 3 20 ~/frigate/research/vk-dispatch/results/clip_vitb32_patched_p1_pass1 image=ref/vitb32_buffalo/clip_visual_input.bin:f32:1x3x224x224
+[hk] HK_PERFTEST active: 0x80 ()
+[hk] HK_PERFTEST active: 0x80 ()
+[hk] HK_PERFTEST active: 0x80 ()
+[hk] HK_PERFTEST active: 0x80 ()
+RESULT type=7(resolved 7) prec=1 thr=4: median 155.93 ms p95 167.03 min 137.26 max 167.03 | load+resize 900 ms | cpu 49.7 ms/iter | mnn session mem 360 MB | rss 374 MB
+clip_visual_ref.npy          <- embedding  cos 0.999986  max|diff| 0.00107  mean|diff| 0.000182  ref range [-0.634,0.116]
+a64b3d9f023bc8e21874aaccfcddfcde  ~/frigate/research/vk-dispatch/results/clip_vitb32_patched_p1_pass1/embedding.bin
+### stock pass1 prec2 :: env ./mnnrun/mnnrun ~/immich-ml/models/mnn/clip_ViT-B-32__openai_visual.mnn 7 2 4 3 20 ~/frigate/research/vk-dispatch/results/clip_vitb32_stock_p2_pass1 image=ref/vitb32_buffalo/clip_visual_input.bin:f32:1x3x224x224
+RESULT type=7(resolved 7) prec=2 thr=4: median 190.70 ms p95 213.67 min 144.86 max 213.67 | load+resize 731 ms | cpu 48.3 ms/iter | mnn session mem 178 MB | rss 399 MB
+clip_visual_ref.npy          <- embedding  cos 0.999983  max|diff| 0.00112  mean|diff| 0.000193  ref range [-0.634,0.116]
+c400799777471a9869625919dfeaa7d4  ~/frigate/research/vk-dispatch/results/clip_vitb32_stock_p2_pass1/embedding.bin
+### patched pass1 prec2 :: ~/frigate/research/vk-dispatch/with-patched.sh ./mnnrun/mnnrun ~/immich-ml/models/mnn/clip_ViT-B-32__openai_visual.mnn 7 2 4 3 20 ~/frigate/research/vk-dispatch/results/clip_vitb32_patched_p2_pass1 image=ref/vitb32_buffalo/clip_visual_input.bin:f32:1x3x224x224
+[hk] HK_PERFTEST active: 0x80 ()
+[hk] HK_PERFTEST active: 0x80 ()
+[hk] HK_PERFTEST active: 0x80 ()
+[hk] HK_PERFTEST active: 0x80 ()
+RESULT type=7(resolved 7) prec=2 thr=4: median 127.27 ms p95 142.15 min 92.03 max 142.15 | load+resize 764 ms | cpu 42.9 ms/iter | mnn session mem 178 MB | rss 370 MB
+clip_visual_ref.npy          <- embedding  cos 0.999983  max|diff| 0.00112  mean|diff| 0.000193  ref range [-0.634,0.116]
+c400799777471a9869625919dfeaa7d4  ~/frigate/research/vk-dispatch/results/clip_vitb32_patched_p2_pass1/embedding.bin
+### stock pass2 prec1 :: env ./mnnrun/mnnrun ~/immich-ml/models/mnn/clip_ViT-B-32__openai_visual.mnn 7 1 4 3 20 ~/frigate/research/vk-dispatch/results/clip_vitb32_stock_p1_pass2 image=ref/vitb32_buffalo/clip_visual_input.bin:f32:1x3x224x224
+RESULT type=7(resolved 7) prec=1 thr=4: median 213.69 ms p95 233.15 min 159.38 max 233.15 | load+resize 795 ms | cpu 49.4 ms/iter | mnn session mem 360 MB | rss 400 MB
+clip_visual_ref.npy          <- embedding  cos 0.999986  max|diff| 0.00107  mean|diff| 0.000182  ref range [-0.634,0.116]
+a64b3d9f023bc8e21874aaccfcddfcde  ~/frigate/research/vk-dispatch/results/clip_vitb32_stock_p1_pass2/embedding.bin
+### patched pass2 prec1 :: ~/frigate/research/vk-dispatch/with-patched.sh ./mnnrun/mnnrun ~/immich-ml/models/mnn/clip_ViT-B-32__openai_visual.mnn 7 1 4 3 20 ~/frigate/research/vk-dispatch/results/clip_vitb32_patched_p1_pass2 image=ref/vitb32_buffalo/clip_visual_input.bin:f32:1x3x224x224
+[hk] HK_PERFTEST active: 0x80 ()
+[hk] HK_PERFTEST active: 0x80 ()
+[hk] HK_PERFTEST active: 0x80 ()
+[hk] HK_PERFTEST active: 0x80 ()
+RESULT type=7(resolved 7) prec=1 thr=4: median 155.77 ms p95 181.29 min 124.36 max 181.29 | load+resize 738 ms | cpu 48.0 ms/iter | mnn session mem 360 MB | rss 370 MB
+clip_visual_ref.npy          <- embedding  cos 0.999986  max|diff| 0.00107  mean|diff| 0.000182  ref range [-0.634,0.116]
+a64b3d9f023bc8e21874aaccfcddfcde  ~/frigate/research/vk-dispatch/results/clip_vitb32_patched_p1_pass2/embedding.bin
+### stock pass2 prec2 :: env ./mnnrun/mnnrun ~/immich-ml/models/mnn/clip_ViT-B-32__openai_visual.mnn 7 2 4 3 20 ~/frigate/research/vk-dispatch/results/clip_vitb32_stock_p2_pass2 image=ref/vitb32_buffalo/clip_visual_input.bin:f32:1x3x224x224
+RESULT type=7(resolved 7) prec=2 thr=4: median 167.05 ms p95 181.91 min 139.65 max 181.91 | load+resize 723 ms | cpu 48.0 ms/iter | mnn session mem 178 MB | rss 398 MB
+clip_visual_ref.npy          <- embedding  cos 0.999983  max|diff| 0.00112  mean|diff| 0.000193  ref range [-0.634,0.116]
+c400799777471a9869625919dfeaa7d4  ~/frigate/research/vk-dispatch/results/clip_vitb32_stock_p2_pass2/embedding.bin
+### patched pass2 prec2 :: ~/frigate/research/vk-dispatch/with-patched.sh ./mnnrun/mnnrun ~/immich-ml/models/mnn/clip_ViT-B-32__openai_visual.mnn 7 2 4 3 20 ~/frigate/research/vk-dispatch/results/clip_vitb32_patched_p2_pass2 image=ref/vitb32_buffalo/clip_visual_input.bin:f32:1x3x224x224
+[hk] HK_PERFTEST active: 0x80 ()
+[hk] HK_PERFTEST active: 0x80 ()
+[hk] HK_PERFTEST active: 0x80 ()
+[hk] HK_PERFTEST active: 0x80 ()
+RESULT type=7(resolved 7) prec=2 thr=4: median 135.85 ms p95 149.37 min 106.66 max 149.37 | load+resize 723 ms | cpu 46.4 ms/iter | mnn session mem 178 MB | rss 370 MB
+clip_visual_ref.npy          <- embedding  cos 0.999983  max|diff| 0.00112  mean|diff| 0.000193  ref range [-0.634,0.116]
+c400799777471a9869625919dfeaa7d4  ~/frigate/research/vk-dispatch/results/clip_vitb32_patched_p2_pass2/embedding.bin

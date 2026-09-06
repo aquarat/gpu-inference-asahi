@@ -1,0 +1,32 @@
+2026-09-06 08:45:23,678 - __main__ - INFO - Cleanup completed
+[0 Apple M1 (G13G B1)]  queueC=0[1]  queueT=0[1]  rebar=1  r-score=10
+[0 Apple M1 (G13G B1)]  fp16-p/s/u/a=1/1/1/1  int8-p/s/u/a=1/1/1/1  bf16-p/s=1/0
+[0 Apple M1 (G13G B1)]  subgroup=32(32~32)  ops=1/1/1/1/1/1/1/1/1/1
+[0 Apple M1 (G13G B1)]  fp16-cm=0  int8-cm=0  bf16-cm=0  fp8-cm=0
+2026-09-06 08:45:23,685 - backends - INFO - [ncnn-vulkan] Vulkan device 0: Apple M1 (G13G B1) (api 0x404167, driver 0x6802063), fp16=True
+2026-09-06 08:45:23,685 - backends - INFO - Using inference backend: ncnn-vulkan(Apple M1 (G13G B1), fp16)
+2026-09-06 08:45:23,685 - __main__ - INFO - ZMQ ONNX client initialized with endpoint: tcp://127.0.0.1:5556
+2026-09-06 08:45:23,685 - __main__ - INFO - ZMQ ONNX client started in AUTO mode - waiting for model requests
+2026-09-06 08:45:23,685 - __main__ - INFO - Attempting to bind to endpoint: tcp://127.0.0.1:5556
+2026-09-06 08:45:23,685 - __main__ - INFO - ZMQ server successfully bound to tcp://127.0.0.1:5556
+2026-09-06 08:45:23,685 - __main__ - INFO - Detector is ready to accept model requests and inference requests
+2026-09-06 08:45:24,655 - __main__ - INFO - Model availability request for: fox-person-cat-320.onnx
+2026-09-06 08:45:24,655 - __main__ - INFO - Model fox-person-cat-320.onnx exists locally
+2026-09-06 08:45:24,655 - __main__ - INFO - Loading model from: ~/frigate/research/vk-dispatch/detector-models/fox-person-cat-320.onnx
+onnxruntime cpuid_info warning: Unknown CPU vendor. cpuinfo_vendor value: 0
+2026-09-06 08:45:24,743 - backends - INFO - [ncnn-vulkan] using cached ncnn model ~/frigate/research/vk-dispatch/detector-models/fox-person-cat-320.ncnn.param
+[hk] HK_PERFTEST active: 0x80 ()
+2026-09-06 08:45:24,886 - backends - INFO - [ncnn-vulkan] loaded fox-person-cat-320.onnx: inputs [('images', [1, 3, 320, 320])] outputs [('output0', [1, 7, 2100])] (655 layers)
+2026-09-06 08:45:24,927 - backends - INFO - [ncnn-vulkan] warm-up ok: outputs [((1, 7, 2100), 'float32')]
+2026-09-06 08:45:25,027 - __main__ - INFO - Model ready for inference
+2026-09-06 08:45:25,889 - __main__ - INFO - Model availability request for: fox-person-cat-320.onnx
+2026-09-06 08:45:25,889 - __main__ - INFO - Model fox-person-cat-320.onnx exists locally
+2026-09-06 08:45:25,889 - __main__ - INFO - Loading model from: ~/frigate/research/vk-dispatch/detector-models/fox-person-cat-320.onnx
+2026-09-06 08:45:25,902 - backends - INFO - [ncnn-vulkan] using cached ncnn model ~/frigate/research/vk-dispatch/detector-models/fox-person-cat-320.ncnn.param
+2026-09-06 08:45:25,999 - backends - INFO - [ncnn-vulkan] loaded fox-person-cat-320.onnx: inputs [('images', [1, 3, 320, 320])] outputs [('output0', [1, 7, 2100])] (655 layers)
+2026-09-06 08:45:26,027 - backends - INFO - [ncnn-vulkan] warm-up ok: outputs [((1, 7, 2100), 'float32')]
+2026-09-06 08:45:26,127 - __main__ - INFO - Model ready for inference
+2026-09-06 08:46:05,335 - __main__ - INFO - Inference stats (ncnn-vulkan(Apple M1 (G13G B1), fp16), fox-person-cat-320.onnx): n=1000 avg=32.5ms max=51.0ms
+2026-09-06 08:46:26,248 - __main__ - INFO - Shutting down server...
+2026-09-06 08:46:26,307 - __main__ - INFO - Cleanup completed
+2026-09-06 08:46:26,307 - __main__ - INFO - Cleanup completed

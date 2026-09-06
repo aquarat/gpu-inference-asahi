@@ -1,0 +1,139 @@
+### llama-bench GPU (Vulkan0), Q8_0 + fp16, pp512/tg128, fa on/off, 3 reps
+ggml_vulkan: Found 1 Vulkan devices:
+ggml_vulkan: 0 = Apple M1 (G13G B1) (Honeykrisp) | uma: 1 | fp16: 1 | bf16: 0 | fp4: 0 | warp size: 32 | shared memory: 32768 | int dot: 0 | matrix cores: none
+| model                          |       size |     params | backend    | ngl | threads |  fa | dev          |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | ------: | --: | ------------ | --------------: | -------------------: |
+| qwen2 1B Q8_0                  | 638.74 MiB |   630.17 M | Vulkan     |  99 |       4 |   0 | Vulkan0      |           pp512 |        783.13 ± 7.06 |
+| qwen2 1B Q8_0                  | 638.74 MiB |   630.17 M | Vulkan     |  99 |       4 |   0 | Vulkan0      |           tg128 |         42.20 ± 7.58 |
+| qwen2 1B Q8_0                  | 638.74 MiB |   630.17 M | Vulkan     |  99 |       4 |   1 | Vulkan0      |           pp512 |       767.84 ± 13.09 |
+| qwen2 1B Q8_0                  | 638.74 MiB |   630.17 M | Vulkan     |  99 |       4 |   1 | Vulkan0      |           tg128 |         45.09 ± 7.89 |
+ggml_vulkan: Found 1 Vulkan devices:
+ggml_vulkan: 0 = Apple M1 (G13G B1) (Honeykrisp) | uma: 1 | fp16: 1 | bf16: 0 | fp4: 0 | warp size: 32 | shared memory: 32768 | int dot: 0 | matrix cores: none
+| model                          |       size |     params | backend    | ngl | threads |  fa | dev          |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | ------: | --: | ------------ | --------------: | -------------------: |
+| qwen2 1B F16                   |   1.17 GiB |   630.17 M | Vulkan     |  99 |       4 |   0 | Vulkan0      |           pp512 |       766.90 ± 10.78 |
+| qwen2 1B F16                   |   1.17 GiB |   630.17 M | Vulkan     |  99 |       4 |   0 | Vulkan0      |           tg128 |         38.46 ± 0.81 |
+| qwen2 1B F16                   |   1.17 GiB |   630.17 M | Vulkan     |  99 |       4 |   1 | Vulkan0      |           pp512 |       757.72 ± 16.19 |
+| qwen2 1B F16                   |   1.17 GiB |   630.17 M | Vulkan     |  99 |       4 |   1 | Vulkan0      |           tg128 |         22.38 ± 5.73 |
+### llama-bench CPU only (-dev none), 4 threads and 8 threads
+| model                          |       size |     params | backend    | ngl | threads |  fa | dev          |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | ------: | --: | ------------ | --------------: | -------------------: |
+| qwen2 1B Q8_0                  | 638.74 MiB |   630.17 M | Vulkan     |   0 |       4 |   0 | none         |           pp512 |        743.04 ± 3.66 |
+| qwen2 1B Q8_0                  | 638.74 MiB |   630.17 M | Vulkan     |   0 |       4 |   0 | none         |           tg128 |         63.76 ± 8.44 |
+| qwen2 1B Q8_0                  | 638.74 MiB |   630.17 M | Vulkan     |   0 |       8 |   0 | none         |           pp512 |        634.80 ± 8.08 |
+| qwen2 1B Q8_0                  | 638.74 MiB |   630.17 M | Vulkan     |   0 |       8 |   0 | none         |           tg128 |         44.59 ± 2.34 |
+| model                          |       size |     params | backend    | ngl | threads |  fa | dev          |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | ------: | --: | ------------ | --------------: | -------------------: |
+| qwen2 1B F16                   |   1.17 GiB |   630.17 M | Vulkan     |   0 |       4 |   0 | none         |           pp512 |        303.31 ± 0.07 |
+| qwen2 1B F16                   |   1.17 GiB |   630.17 M | Vulkan     |   0 |       4 |   0 | none         |           tg128 |         42.17 ± 0.21 |
+| qwen2 1B F16                   |   1.17 GiB |   630.17 M | Vulkan     |   0 |       8 |   0 | none         |           pp512 |       338.31 ± 17.08 |
+| qwen2 1B F16                   |   1.17 GiB |   630.17 M | Vulkan     |   0 |       8 |   0 | none         |           tg128 |          7.57 ± 7.73 |
+### llama-bench GPU pp at 128/512/1024 (GEMM scaling), q8_0 fa=1
+| model                          |       size |     params | backend    | ngl | threads |  fa | dev          |            test |                  t/s |
+| ------------------------------ | ---------: | ---------: | ---------- | --: | ------: | --: | ------------ | --------------: | -------------------: |
+| qwen2 1B Q8_0                  | 638.74 MiB |   630.17 M | Vulkan     |  99 |       4 |   1 | Vulkan0      |           pp128 |       545.53 ± 15.78 |
+| qwen2 1B Q8_0                  | 638.74 MiB |   630.17 M | Vulkan     |  99 |       4 |   1 | Vulkan0      |          pp1024 |        713.35 ± 6.17 |
+### ViT-B-32 variants on Vulkan
+shapes: RESULT backend=Vulkan0 fa=0 iters=5 median_ms=43.4 min_ms=43.3 mean_ms=43.6 weights_MB=351 rss_MB=79 hwm_MB=79
+noise: RESULT backend=Vulkan0 fa=0 iters=5 median_ms=43.7 min_ms=43.2 mean_ms=43.8 weights_MB=351 rss_MB=70 hwm_MB=70
+checker: RESULT backend=Vulkan0 fa=0 iters=5 median_ms=44.8 min_ms=43.3 mean_ms=44.6 weights_MB=351 rss_MB=70 hwm_MB=70
+t1: RESULT backend=Vulkan0 fa=0 iters=5 median_ms=43.8 min_ms=43.5 mean_ms=44.0 weights_MB=351 rss_MB=69 hwm_MB=69
+  cos shapes: 0.998529  maxabs 0.01111
+  cos noise: 0.999998  maxabs 0.00055
+  cos checker: 0.999837  maxabs 0.00572
+  cos t1: 0.999686  maxabs 0.00478
+  cos min 0.998529 mean 0.999512
+OVERALL vitb32_f32_vk median-of-medians: 43.7 ms over 4 images
+backend: Vulkan0 (Apple M1 (G13G B1)) mem free 8118 MB / total 8118 MB
+graph: 370 nodes; unsupported on Vulkan0: none
+weights: 351.4 MB in Vulkan0 buffer, loaded in 271 ms
+shapes: RESULT backend=Vulkan0 fa=0 iters=5 median_ms=39.5 min_ms=38.8 mean_ms=39.7 weights_MB=96 rss_MB=69 hwm_MB=69
+noise: RESULT backend=Vulkan0 fa=0 iters=5 median_ms=39.0 min_ms=38.8 mean_ms=39.7 weights_MB=96 rss_MB=69 hwm_MB=69
+checker: RESULT backend=Vulkan0 fa=0 iters=5 median_ms=39.5 min_ms=38.8 mean_ms=39.5 weights_MB=96 rss_MB=69 hwm_MB=69
+t1: RESULT backend=Vulkan0 fa=0 iters=5 median_ms=40.1 min_ms=38.9 mean_ms=39.9 weights_MB=96 rss_MB=70 hwm_MB=70
+  cos shapes: 0.999154  maxabs 0.00880
+  cos noise: 0.999882  maxabs 0.00207
+  cos checker: 0.999699  maxabs 0.00317
+  cos t1: 0.999007  maxabs 0.00692
+  cos min 0.999007 mean 0.999435
+OVERALL vitb32_q8_vk median-of-medians: 39.5 ms over 4 images
+backend: Vulkan0 (Apple M1 (G13G B1)) mem free 8118 MB / total 8118 MB
+graph: 370 nodes; unsupported on Vulkan0: none
+weights: 96.0 MB in Vulkan0 buffer, loaded in 22 ms
+shapes: RESULT backend=Vulkan0 fa=1 iters=5 median_ms=45.2 min_ms=38.2 mean_ms=45.7 weights_MB=176 rss_MB=69 hwm_MB=69
+noise: RESULT backend=Vulkan0 fa=1 iters=5 median_ms=38.2 min_ms=37.7 mean_ms=38.7 weights_MB=176 rss_MB=70 hwm_MB=70
+checker: RESULT backend=Vulkan0 fa=1 iters=5 median_ms=37.9 min_ms=37.7 mean_ms=38.2 weights_MB=176 rss_MB=69 hwm_MB=69
+t1: RESULT backend=Vulkan0 fa=1 iters=5 median_ms=38.1 min_ms=37.6 mean_ms=38.2 weights_MB=176 rss_MB=69 hwm_MB=69
+  cos shapes: 0.999262  maxabs 0.00796
+  cos noise: 0.999936  maxabs 0.00263
+  cos checker: 0.999779  maxabs 0.00426
+  cos t1: 0.999440  maxabs 0.00655
+  cos min 0.999262 mean 0.999604
+OVERALL vitb32_f16_vk_fa median-of-medians: 38.1 ms over 4 images
+backend: Vulkan0 (Apple M1 (G13G B1)) mem free 8118 MB / total 8118 MB
+graph: 322 nodes; unsupported on Vulkan0: none
+weights: 176.0 MB in Vulkan0 buffer, loaded in 39 ms
+shapes: RESULT backend=Vulkan0 fa=0 iters=5 median_ms=49.8 min_ms=49.1 mean_ms=49.7 weights_MB=176 rss_MB=75 hwm_MB=75
+noise: RESULT backend=Vulkan0 fa=0 iters=5 median_ms=50.0 min_ms=49.4 mean_ms=50.1 weights_MB=176 rss_MB=66 hwm_MB=66
+checker: RESULT backend=Vulkan0 fa=0 iters=5 median_ms=50.0 min_ms=49.4 mean_ms=50.2 weights_MB=176 rss_MB=66 hwm_MB=66
+t1: RESULT backend=Vulkan0 fa=0 iters=5 median_ms=49.8 min_ms=49.5 mean_ms=50.2 weights_MB=176 rss_MB=66 hwm_MB=66
+  cos shapes: 0.999999  maxabs 0.00018
+  cos noise: 1.000000  maxabs 0.00007
+  cos checker: 1.000000  maxabs 0.00007
+  cos t1: 0.999999  maxabs 0.00018
+  cos min 0.999999 mean 1.000000
+OVERALL vitb32_f16_vk_nof16 median-of-medians: 49.8 ms over 4 images
+backend: Vulkan0 (Apple M1 (G13G B1)) mem free 8118 MB / total 8118 MB
+graph: 370 nodes; unsupported on Vulkan0: none
+weights: 176.0 MB in Vulkan0 buffer, loaded in 42 ms
+### ViT-B-32 on ggml CPU (f16, q8_0, f32), 4 threads
+shapes: RESULT backend=CPU fa=0 iters=5 median_ms=43.0 min_ms=42.9 mean_ms=43.0 weights_MB=176 rss_MB=189 hwm_MB=189
+noise: RESULT backend=CPU fa=0 iters=5 median_ms=43.1 min_ms=43.0 mean_ms=43.1 weights_MB=176 rss_MB=189 hwm_MB=189
+checker: RESULT backend=CPU fa=0 iters=5 median_ms=44.3 min_ms=44.1 mean_ms=44.3 weights_MB=176 rss_MB=189 hwm_MB=189
+t1: RESULT backend=CPU fa=0 iters=5 median_ms=43.3 min_ms=43.0 mean_ms=43.3 weights_MB=176 rss_MB=189 hwm_MB=189
+  cos shapes: 0.999949  maxabs 0.00258
+  cos noise: 0.999996  maxabs 0.00075
+  cos checker: 0.999991  maxabs 0.00093
+  cos t1: 0.999946  maxabs 0.00200
+  cos min 0.999946 mean 0.999971
+OVERALL vitb32_f16_cpu median-of-medians: 43.1 ms over 4 images
+backend: CPU (CPU) mem free 16238 MB / total 16238 MB
+graph: 370 nodes; unsupported on CPU: none
+weights: 176.0 MB in CPU buffer, loaded in 32 ms
+shapes: RESULT backend=CPU fa=0 iters=5 median_ms=31.7 min_ms=31.7 mean_ms=31.8 weights_MB=96 rss_MB=113 hwm_MB=113
+noise: RESULT backend=CPU fa=0 iters=5 median_ms=31.8 min_ms=31.8 mean_ms=31.9 weights_MB=96 rss_MB=112 hwm_MB=112
+checker: RESULT backend=CPU fa=0 iters=5 median_ms=31.8 min_ms=31.8 mean_ms=31.9 weights_MB=96 rss_MB=113 hwm_MB=113
+t1: RESULT backend=CPU fa=0 iters=5 median_ms=31.8 min_ms=31.8 mean_ms=32.2 weights_MB=96 rss_MB=112 hwm_MB=112
+  cos shapes: 0.999426  maxabs 0.00947
+  cos noise: 0.999752  maxabs 0.00459
+  cos checker: 0.999751  maxabs 0.00344
+  cos t1: 0.999394  maxabs 0.00778
+  cos min 0.999394 mean 0.999581
+OVERALL vitb32_q8_cpu median-of-medians: 31.8 ms over 4 images
+backend: CPU (CPU) mem free 16238 MB / total 16238 MB
+graph: 370 nodes; unsupported on CPU: none
+weights: 96.0 MB in CPU buffer, loaded in 15 ms
+shapes: RESULT backend=CPU fa=0 iters=5 median_ms=72.6 min_ms=72.4 mean_ms=72.8 weights_MB=351 rss_MB=360 hwm_MB=360
+noise: RESULT backend=CPU fa=0 iters=5 median_ms=72.7 min_ms=72.5 mean_ms=72.7 weights_MB=351 rss_MB=360 hwm_MB=360
+checker: RESULT backend=CPU fa=0 iters=5 median_ms=72.7 min_ms=72.6 mean_ms=72.7 weights_MB=351 rss_MB=359 hwm_MB=359
+t1: RESULT backend=CPU fa=0 iters=5 median_ms=73.0 min_ms=72.7 mean_ms=73.3 weights_MB=351 rss_MB=360 hwm_MB=360
+  cos shapes: 0.999955  maxabs 0.00221
+  cos noise: 1.000000  maxabs 0.00005
+  cos checker: 0.999998  maxabs 0.00070
+  cos t1: 0.999950  maxabs 0.00177
+  cos min 0.999950 mean 0.999976
+OVERALL vitb32_f32_cpu median-of-medians: 72.7 ms over 4 images
+backend: CPU (CPU) mem free 16238 MB / total 16238 MB
+graph: 370 nodes; unsupported on CPU: none
+weights: 351.4 MB in CPU buffer, loaded in 74 ms
+### ORT references (quiet CPU): ViT-B-32 and ViT-L-14 timing, ViT-H embeddings + timing
+               total        used        free      shared  buff/cache   available
+Mem:            15Gi       8.6Gi       1.6Gi       251Mi       6.1Gi       6.5Gi
+ORT CPU fp32 thr=4 size=224: median 33.1 ms min 33.0 n=40 rss 624 MB
+ORT CPU fp32 thr=4 size=224: median 563.2 ms min 539.0 n=12 rss 2052 MB
+shapes: input (1, 3, 378, 378) emb (1024,) norm-check 1.0000
+noise: input (1, 3, 378, 378) emb (1024,) norm-check 1.0000
+checker: input (1, 3, 378, 378) emb (1024,) norm-check 1.0000
+t1: input (1, 3, 378, 378) emb (1024,) norm-check 1.0000
+ORT CPU fp32 thr=4 size=378: median 3678.1 ms min 3623.4 n=8 rss 2505 MB
+CHAIN1_DONE

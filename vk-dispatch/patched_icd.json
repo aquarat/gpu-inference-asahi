@@ -1,0 +1,8 @@
+{
+    "ICD": {
+        "api_version": "1.4.359",
+        "library_arch": "64",
+        "library_path": "<absolute path to>/vk-dispatch/patched-mesa/usr/lib64/honeykrisp-got/libvulkan_asahi.so"
+    },
+    "file_format_version": "1.0.1"
+}

@@ -1,0 +1,54 @@
+### stock pass1 :: python bench_ncnn.py ncnn_models/fox-person-cat-320 ~/frigate/config/model_cache/fox-person-cat-320.onnx 100
+onnxruntime cpuid_info warning: Unknown CPU vendor. cpuinfo_vendor value: 0
+[0 Apple M1 (G13G B1)]  queueC=0[1]  queueT=0[1]  rebar=1  r-score=10
+[0 Apple M1 (G13G B1)]  fp16-p/s/u/a=1/1/1/1  int8-p/s/u/a=1/1/1/1  bf16-p/s=1/0
+[0 Apple M1 (G13G B1)]  subgroup=32(32~32)  ops=1/1/1/1/1/1/1/1/1/1
+[0 Apple M1 (G13G B1)]  fp16-cm=0  int8-cm=0  bf16-cm=0  fp8-cm=0
+[1 llvmpipe (LLVM 22.1.8, 128 bits)]  queueC=0[1]  queueT=0[1]  rebar=1  r-score=14
+[1 llvmpipe (LLVM 22.1.8, 128 bits)]  fp16-p/s/u/a=1/1/1/1  int8-p/s/u/a=1/1/1/1  bf16-p/s=1/0
+[1 llvmpipe (LLVM 22.1.8, 128 bits)]  subgroup=4(4~4)  ops=1/1/1/1/1/1/1/1/1/1
+[1 llvmpipe (LLVM 22.1.8, 128 bits)]  fp16-cm=0  int8-cm=0  bf16-cm=0  fp8-cm=0
+ncnn 1.0.20260526 gpus: 2 device0: Apple M1 (G13G B1)
+CPU fp32 4thr                mean   7.53 ms  median   7.51  p95   7.61  min   7.46 -> 133.2 fps | vs ORT: max|diff| 0.0045  mean|diff| 0.00002 (out range 0.0..325.7)
+CPU fp16 4thr                mean   4.83 ms  median   4.83  p95   4.88  min   4.78 -> 207.1 fps | vs ORT: max|diff| 16.1462  mean|diff| 0.16087 (out range 0.0..325.7)
+Vulkan fp32                  mean  34.07 ms  median  34.03  p95  37.57  min  27.67 ->  29.4 fps | vs ORT: max|diff| 0.0029  mean|diff| 0.00002 (out range 0.0..325.7)
+Vulkan fp16                  mean  28.61 ms  median  28.39  p95  32.42  min  22.74 ->  35.2 fps | vs ORT: max|diff| 10.0212  mean|diff| 0.17183 (out range 0.0..325.7)
+### patched pass1 :: ~/frigate/research/vk-dispatch/with-patched.sh python bench_ncnn.py ncnn_models/fox-person-cat-320 ~/frigate/config/model_cache/fox-person-cat-320.onnx 100
+onnxruntime cpuid_info warning: Unknown CPU vendor. cpuinfo_vendor value: 0
+[0 Apple M1 (G13G B1)]  queueC=0[1]  queueT=0[1]  rebar=1  r-score=10
+[0 Apple M1 (G13G B1)]  fp16-p/s/u/a=1/1/1/1  int8-p/s/u/a=1/1/1/1  bf16-p/s=1/0
+[0 Apple M1 (G13G B1)]  subgroup=32(32~32)  ops=1/1/1/1/1/1/1/1/1/1
+[0 Apple M1 (G13G B1)]  fp16-cm=0  int8-cm=0  bf16-cm=0  fp8-cm=0
+[hk] HK_PERFTEST active: 0x80 ()
+ncnn 1.0.20260526 gpus: 1 device0: Apple M1 (G13G B1)
+CPU fp32 4thr                mean   7.60 ms  median   7.50  p95   7.57  min   7.45 -> 133.3 fps | vs ORT: max|diff| 0.0011  mean|diff| 0.00002 (out range 0.0..326.0)
+CPU fp16 4thr                mean   4.80 ms  median   4.80  p95   4.82  min   4.75 -> 208.5 fps | vs ORT: max|diff| 15.3710  mean|diff| 0.19614 (out range 0.0..326.0)
+Vulkan fp32                  mean  39.98 ms  median  40.16  p95  47.55  min  30.07 ->  24.9 fps | vs ORT: max|diff| 0.0011  mean|diff| 0.00002 (out range 0.0..326.0)
+Vulkan fp16                  mean  33.63 ms  median  34.07  p95  40.66  min  23.70 ->  29.4 fps | vs ORT: max|diff| 13.8300  mean|diff| 0.14384 (out range 0.0..326.0)
+### stock pass2 :: python bench_ncnn.py ncnn_models/fox-person-cat-320 ~/frigate/config/model_cache/fox-person-cat-320.onnx 100
+onnxruntime cpuid_info warning: Unknown CPU vendor. cpuinfo_vendor value: 0
+[0 Apple M1 (G13G B1)]  queueC=0[1]  queueT=0[1]  rebar=1  r-score=10
+[0 Apple M1 (G13G B1)]  fp16-p/s/u/a=1/1/1/1  int8-p/s/u/a=1/1/1/1  bf16-p/s=1/0
+[0 Apple M1 (G13G B1)]  subgroup=32(32~32)  ops=1/1/1/1/1/1/1/1/1/1
+[0 Apple M1 (G13G B1)]  fp16-cm=0  int8-cm=0  bf16-cm=0  fp8-cm=0
+[1 llvmpipe (LLVM 22.1.8, 128 bits)]  queueC=0[1]  queueT=0[1]  rebar=1  r-score=14
+[1 llvmpipe (LLVM 22.1.8, 128 bits)]  fp16-p/s/u/a=1/1/1/1  int8-p/s/u/a=1/1/1/1  bf16-p/s=1/0
+[1 llvmpipe (LLVM 22.1.8, 128 bits)]  subgroup=4(4~4)  ops=1/1/1/1/1/1/1/1/1/1
+[1 llvmpipe (LLVM 22.1.8, 128 bits)]  fp16-cm=0  int8-cm=0  bf16-cm=0  fp8-cm=0
+ncnn 1.0.20260526 gpus: 2 device0: Apple M1 (G13G B1)
+CPU fp32 4thr                mean   7.88 ms  median   7.54  p95   8.31  min   7.46 -> 132.6 fps | vs ORT: max|diff| 0.0025  mean|diff| 0.00003 (out range 0.0..325.9)
+CPU fp16 4thr                mean   5.06 ms  median   4.81  p95   4.86  min   4.76 -> 207.7 fps | vs ORT: max|diff| 27.4259  mean|diff| 0.24651 (out range 0.0..325.9)
+Vulkan fp32                  mean  36.20 ms  median  35.11  p95  45.08  min  29.69 ->  28.5 fps | vs ORT: max|diff| 0.0034  mean|diff| 0.00002 (out range 0.0..325.9)
+Vulkan fp16                  mean  28.15 ms  median  28.04  p95  31.74  min  23.22 ->  35.7 fps | vs ORT: max|diff| 14.7440  mean|diff| 0.19426 (out range 0.0..325.9)
+### patched pass2 :: ~/frigate/research/vk-dispatch/with-patched.sh python bench_ncnn.py ncnn_models/fox-person-cat-320 ~/frigate/config/model_cache/fox-person-cat-320.onnx 100
+onnxruntime cpuid_info warning: Unknown CPU vendor. cpuinfo_vendor value: 0
+[0 Apple M1 (G13G B1)]  queueC=0[1]  queueT=0[1]  rebar=1  r-score=10
+[0 Apple M1 (G13G B1)]  fp16-p/s/u/a=1/1/1/1  int8-p/s/u/a=1/1/1/1  bf16-p/s=1/0
+[0 Apple M1 (G13G B1)]  subgroup=32(32~32)  ops=1/1/1/1/1/1/1/1/1/1
+[0 Apple M1 (G13G B1)]  fp16-cm=0  int8-cm=0  bf16-cm=0  fp8-cm=0
+[hk] HK_PERFTEST active: 0x80 ()
+ncnn 1.0.20260526 gpus: 1 device0: Apple M1 (G13G B1)
+CPU fp32 4thr                mean   7.57 ms  median   7.51  p95   7.67  min   7.46 -> 133.2 fps | vs ORT: max|diff| 0.0014  mean|diff| 0.00002 (out range 0.0..326.2)
+CPU fp16 4thr                mean   4.82 ms  median   4.82  p95   4.85  min   4.77 -> 207.4 fps | vs ORT: max|diff| 6.4007  mean|diff| 0.13555 (out range 0.0..326.2)
+Vulkan fp32                  mean  34.39 ms  median  34.54  p95  37.49  min  30.10 ->  29.0 fps | vs ORT: max|diff| 0.0010  mean|diff| 0.00002 (out range 0.0..326.2)
+Vulkan fp16                  mean  29.06 ms  median  28.57  p95  32.12  min  24.01 ->  35.0 fps | vs ORT: max|diff| 8.1512  mean|diff| 0.12748 (out range 0.0..326.2)

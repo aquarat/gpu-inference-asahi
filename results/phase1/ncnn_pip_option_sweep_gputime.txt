@@ -1,0 +1,21 @@
+### ncnn pip vk fp16 opts: [] (HK_GPUTIME, patched driver)
+[hk gputime]   pipeline barriers 153036 (0.0/frame): 152880 compute-only (0.0/frame ending real work), 0 compute-only but gfx open, 156 need the hammer
+[hk gputime]   GPU busy (union) 1600.9 ms = 78.5% of wall
+[hk gputime]   GPU idle 431.8 ms in 311 gaps (0.0/frame, largest 13036 us)
+[hk gputime]   driver helper kernels: 3666 dispatches (0.0/frame) across 1 kernels
+ncnn fox-person-cat-320-opt gpu=1 fp16=1 {}: median 25.02 ms p95 30.28 min 22.79 max 42.31 -> 40.0 fps | cpu 1.92 ms/iter | wall 25.8 ms/iter (out (8, 2100))
+### ncnn pip vk fp16 opts: [use_shader_pack8=0] (HK_GPUTIME, patched driver)
+### ncnn pip vk fp16 opts: [use_image_storage=1] (HK_GPUTIME, patched driver)
+### ncnn pip vk fp16 opts: [use_subgroup_ops=0] (HK_GPUTIME, patched driver)
+[hk gputime]   pipeline barriers 144889 (0.0/frame): 144743 compute-only (0.0/frame ending real work), 0 compute-only but gfx open, 146 need the hammer
+[hk gputime]   GPU busy (union) 1509.6 ms = 74.3% of wall
+[hk gputime]   GPU idle 519.8 ms in 293 gaps (0.0/frame, largest 6593 us)
+[hk gputime]   driver helper kernels: 3467 dispatches (0.0/frame) across 1 kernels
+ncnn fox-person-cat-320-opt gpu=1 fp16=1 {'use_subgroup_ops': '0'}: median 27.47 ms p95 32.80 min 22.92 max 37.07 -> 36.4 fps | cpu 2.84 ms/iter | wall 27.8 ms/iter (out (8, 2100))
+### ncnn pip vk fp16 opts: [use_fp16_arithmetic=0] (HK_GPUTIME, patched driver)
+[hk gputime]   pipeline barriers 143226 (0.0/frame): 143080 compute-only (0.0/frame ending real work), 0 compute-only but gfx open, 146 need the hammer
+[hk gputime]   GPU busy (union) 1563.3 ms = 76.6% of wall
+[hk gputime]   GPU idle 477.0 ms in 291 gaps (0.0/frame, largest 5344 us)
+[hk gputime]   driver helper kernels: 3431 dispatches (0.0/frame) across 1 kernels
+ncnn fox-person-cat-320-opt gpu=1 fp16=1 {'use_fp16_arithmetic': '0'}: median 27.97 ms p95 31.01 min 24.29 max 36.90 -> 35.8 fps | cpu 1.92 ms/iter | wall 27.8 ms/iter (out (8, 2100))
+### ncnn pip vk fp16 opts: [use_shader_pack8=0 use_fp16_arithmetic=0] (HK_GPUTIME, patched driver)

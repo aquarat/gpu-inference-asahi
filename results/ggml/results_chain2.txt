@@ -1,0 +1,143 @@
+### ViT-L-14 (224 px, 24 x 1024, 257 tokens) Vulkan
+--- 10:19:25 free: 6.5Gi avail; other GPU jobs: 2
+shapes: RESULT backend=Vulkan0 fa=0 iters=5 median_ms=350.5 min_ms=347.2 mean_ms=352.6 weights_MB=609 rss_MB=79 hwm_MB=79
+noise: RESULT backend=Vulkan0 fa=0 iters=5 median_ms=347.5 min_ms=346.4 mean_ms=355.6 weights_MB=609 rss_MB=70 hwm_MB=75
+checker: RESULT backend=Vulkan0 fa=0 iters=5 median_ms=347.6 min_ms=346.4 mean_ms=359.5 weights_MB=609 rss_MB=71 hwm_MB=75
+t1: RESULT backend=Vulkan0 fa=0 iters=5 median_ms=347.6 min_ms=347.2 mean_ms=359.2 weights_MB=609 rss_MB=72 hwm_MB=74
+  cos shapes: 0.999819  maxabs 0.00456
+  cos noise: 0.999793  maxabs 0.00388
+  cos checker: 0.999846  maxabs 0.00418
+  cos t1: 0.999769  maxabs 0.00335
+  cos min 0.999769 mean 0.999807
+OVERALL vitl14_f16_vk median-of-medians: 347.6 ms over 4 images
+backend: Vulkan0 (Apple M1 (G13G B1)) mem free 8118 MB / total 8118 MB
+graph: 718 nodes; unsupported on Vulkan0: none
+weights: 609.1 MB in Vulkan0 buffer, loaded in 168 ms
+shapes: RESULT backend=Vulkan0 fa=1 iters=5 median_ms=392.0 min_ms=354.7 mean_ms=383.5 weights_MB=609 rss_MB=70 hwm_MB=74
+noise: RESULT backend=Vulkan0 fa=1 iters=5 median_ms=361.4 min_ms=355.0 mean_ms=365.0 weights_MB=609 rss_MB=70 hwm_MB=75
+checker: RESULT backend=Vulkan0 fa=1 iters=5 median_ms=355.2 min_ms=353.8 mean_ms=362.1 weights_MB=609 rss_MB=71 hwm_MB=74
+t1: RESULT backend=Vulkan0 fa=1 iters=5 median_ms=355.2 min_ms=354.2 mean_ms=365.9 weights_MB=609 rss_MB=70 hwm_MB=74
+  cos shapes: 0.999822  maxabs 0.00487
+  cos noise: 0.999772  maxabs 0.00368
+  cos checker: 0.999854  maxabs 0.00412
+  cos t1: 0.999824  maxabs 0.00238
+  cos min 0.999772 mean 0.999818
+OVERALL vitl14_f16_vk_fa median-of-medians: 355.2 ms over 4 images
+backend: Vulkan0 (Apple M1 (G13G B1)) mem free 8118 MB / total 8118 MB
+graph: 622 nodes; unsupported on Vulkan0: none
+weights: 609.1 MB in Vulkan0 buffer, loaded in 173 ms
+shapes: RESULT backend=Vulkan0 fa=0 iters=5 median_ms=359.1 min_ms=340.0 mean_ms=356.9 weights_MB=325 rss_MB=70 hwm_MB=70
+noise: RESULT backend=Vulkan0 fa=0 iters=5 median_ms=340.3 min_ms=339.1 mean_ms=347.6 weights_MB=325 rss_MB=71 hwm_MB=71
+checker: RESULT backend=Vulkan0 fa=0 iters=5 median_ms=340.5 min_ms=339.8 mean_ms=351.7 weights_MB=325 rss_MB=71 hwm_MB=71
+t1: RESULT backend=Vulkan0 fa=0 iters=5 median_ms=341.1 min_ms=339.4 mean_ms=352.2 weights_MB=325 rss_MB=71 hwm_MB=71
+  cos shapes: 0.999766  maxabs 0.00468
+  cos noise: 0.999697  maxabs 0.00502
+  cos checker: 0.999771  maxabs 0.00533
+  cos t1: 0.999676  maxabs 0.00361
+  cos min 0.999676 mean 0.999728
+OVERALL vitl14_q8_vk median-of-medians: 340.5 ms over 4 images
+backend: Vulkan0 (Apple M1 (G13G B1)) mem free 8118 MB / total 8118 MB
+graph: 718 nodes; unsupported on Vulkan0: none
+weights: 325.3 MB in Vulkan0 buffer, loaded in 146 ms
+### ViT-L-14 ggml CPU 4 threads
+--- 10:19:54 free: 6.3Gi avail; other GPU jobs: 2
+shapes: RESULT backend=CPU fa=0 iters=3 median_ms=766.0 min_ms=765.5 mean_ms=765.9 weights_MB=609 rss_MB=614 hwm_MB=614
+noise: RESULT backend=CPU fa=0 iters=3 median_ms=767.3 min_ms=766.3 mean_ms=847.5 weights_MB=609 rss_MB=613 hwm_MB=613
+checker: RESULT backend=CPU fa=0 iters=3 median_ms=766.2 min_ms=766.0 mean_ms=766.3 weights_MB=609 rss_MB=613 hwm_MB=613
+t1: RESULT backend=CPU fa=0 iters=3 median_ms=765.7 min_ms=765.4 mean_ms=770.5 weights_MB=609 rss_MB=614 hwm_MB=614
+  cos shapes: 0.999985  maxabs 0.00078
+  cos noise: 0.999988  maxabs 0.00058
+  cos checker: 0.999990  maxabs 0.00051
+  cos t1: 0.999972  maxabs 0.00088
+  cos min 0.999972 mean 0.999984
+OVERALL vitl14_f16_cpu median-of-medians: 766.0 ms over 4 images
+backend: CPU (CPU) mem free 16238 MB / total 16238 MB
+graph: 718 nodes; unsupported on CPU: none
+weights: 609.1 MB in CPU buffer, loaded in 142 ms
+shapes: RESULT backend=CPU fa=0 iters=3 median_ms=602.0 min_ms=601.1 mean_ms=601.9 weights_MB=325 rss_MB=342 hwm_MB=342
+noise: RESULT backend=CPU fa=0 iters=3 median_ms=603.4 min_ms=602.1 mean_ms=603.1 weights_MB=325 rss_MB=342 hwm_MB=342
+checker: RESULT backend=CPU fa=0 iters=3 median_ms=604.4 min_ms=602.9 mean_ms=604.3 weights_MB=325 rss_MB=341 hwm_MB=341
+t1: RESULT backend=CPU fa=0 iters=3 median_ms=606.8 min_ms=604.5 mean_ms=607.7 weights_MB=325 rss_MB=341 hwm_MB=341
+  cos shapes: 0.999855  maxabs 0.00207
+  cos noise: 0.999760  maxabs 0.00254
+  cos checker: 0.999859  maxabs 0.00202
+  cos t1: 0.999754  maxabs 0.00235
+  cos min 0.999754 mean 0.999807
+OVERALL vitl14_q8_cpu median-of-medians: 603.4 ms over 4 images
+backend: CPU (CPU) mem free 16238 MB / total 16238 MB
+graph: 718 nodes; unsupported on CPU: none
+weights: 325.3 MB in CPU buffer, loaded in 61 ms
+### ViT-H-14-378 (378 px, 32 x 1280, 730 tokens) Vulkan
+--- 10:20:18 free: 6.6Gi avail; other GPU jobs: 2
+shapes: RESULT backend=Vulkan0 fa=0 iters=3 median_ms=1873.8 min_ms=1871.5 mean_ms=1876.2 weights_MB=1268 rss_MB=75 hwm_MB=82
+noise: RESULT backend=Vulkan0 fa=0 iters=3 median_ms=1888.6 min_ms=1885.2 mean_ms=1891.5 weights_MB=1268 rss_MB=73 hwm_MB=84
+checker: RESULT backend=Vulkan0 fa=0 iters=3 median_ms=1907.2 min_ms=1902.2 mean_ms=1907.2 weights_MB=1268 rss_MB=74 hwm_MB=81
+t1: RESULT backend=Vulkan0 fa=0 iters=3 median_ms=1862.4 min_ms=1850.8 mean_ms=1861.5 weights_MB=1268 rss_MB=74 hwm_MB=82
+  cos shapes: 0.999423  maxabs 0.00501
+  cos noise: 0.998915  maxabs 0.01202
+  cos checker: 0.999256  maxabs 0.00460
+  cos t1: 0.998543  maxabs 0.00585
+  cos min 0.998543 mean 0.999034
+OVERALL vith14_f16_vk median-of-medians: 1873.8 ms over 4 images
+backend: Vulkan0 (Apple M1 (G13G B1)) mem free 8118 MB / total 8118 MB
+graph: 950 nodes; unsupported on Vulkan0: none
+weights: 1268.3 MB in Vulkan0 buffer, loaded in 1185 ms
+--- 10:20:52 free: 6.2Gi avail; other GPU jobs: 2
+shapes: RESULT backend=Vulkan0 fa=1 iters=3 median_ms=1775.8 min_ms=1775.0 mean_ms=1775.7 weights_MB=1268 rss_MB=117 hwm_MB=117
+noise: RESULT backend=Vulkan0 fa=1 iters=3 median_ms=1799.3 min_ms=1796.5 mean_ms=1799.0 weights_MB=1268 rss_MB=73 hwm_MB=82
+checker: RESULT backend=Vulkan0 fa=1 iters=3 median_ms=1796.9 min_ms=1792.3 mean_ms=1799.1 weights_MB=1268 rss_MB=74 hwm_MB=82
+t1: RESULT backend=Vulkan0 fa=1 iters=3 median_ms=1775.0 min_ms=1773.9 mean_ms=1775.3 weights_MB=1268 rss_MB=72 hwm_MB=82
+  cos shapes: 0.999414  maxabs 0.00506
+  cos noise: 0.998905  maxabs 0.01149
+  cos checker: 0.999276  maxabs 0.00470
+  cos t1: 0.998523  maxabs 0.00640
+  cos min 0.998523 mean 0.999030
+OVERALL vith14_f16_vk_fa median-of-medians: 1775.8 ms over 4 images
+backend: Vulkan0 (Apple M1 (G13G B1)) mem free 8118 MB / total 8118 MB
+graph: 822 nodes; unsupported on Vulkan0: none
+weights: 1268.3 MB in Vulkan0 buffer, loaded in 425 ms
+--- 10:21:23 free: 6.3Gi avail; other GPU jobs: 2
+shapes: RESULT backend=Vulkan0 fa=0 iters=3 median_ms=1809.5 min_ms=1804.2 mean_ms=1808.6 weights_MB=677 rss_MB=73 hwm_MB=73
+noise: RESULT backend=Vulkan0 fa=0 iters=3 median_ms=1809.7 min_ms=1803.9 mean_ms=1808.1 weights_MB=677 rss_MB=74 hwm_MB=74
+checker: RESULT backend=Vulkan0 fa=0 iters=3 median_ms=1805.5 min_ms=1805.4 mean_ms=1807.6 weights_MB=677 rss_MB=74 hwm_MB=74
+t1: RESULT backend=Vulkan0 fa=0 iters=3 median_ms=1826.5 min_ms=1808.5 mean_ms=1821.5 weights_MB=677 rss_MB=73 hwm_MB=73
+  cos shapes: 0.999420  maxabs 0.00536
+  cos noise: 0.999059  maxabs 0.01011
+  cos checker: 0.999225  maxabs 0.00405
+  cos t1: 0.998579  maxabs 0.00650
+  cos min 0.998579 mean 0.999071
+OVERALL vith14_q8_vk median-of-medians: 1809.5 ms over 4 images
+backend: Vulkan0 (Apple M1 (G13G B1)) mem free 8118 MB / total 8118 MB
+graph: 950 nodes; unsupported on Vulkan0: none
+weights: 677.3 MB in Vulkan0 buffer, loaded in 152 ms
+### ViT-H-14-378 ggml CPU 4 threads
+--- 10:21:53 free: 6.4Gi avail; other GPU jobs: 2
+shapes: RESULT backend=CPU fa=0 iters=2 median_ms=5565.7 min_ms=5185.1 mean_ms=5375.4 weights_MB=1268 rss_MB=1293 hwm_MB=1293
+noise: RESULT backend=CPU fa=0 iters=2 median_ms=5400.5 min_ms=5386.0 mean_ms=5393.3 weights_MB=1268 rss_MB=1292 hwm_MB=1292
+checker: RESULT backend=CPU fa=0 iters=2 median_ms=5367.7 min_ms=5320.3 mean_ms=5344.0 weights_MB=1268 rss_MB=1293 hwm_MB=1293
+t1: RESULT backend=CPU fa=0 iters=2 median_ms=5329.5 min_ms=5304.8 mean_ms=5317.1 weights_MB=1268 rss_MB=1292 hwm_MB=1292
+  cos shapes: 0.999975  maxabs 0.00082
+  cos noise: 0.999924  maxabs 0.00120
+  cos checker: 0.999975  maxabs 0.00070
+  cos t1: 0.999864  maxabs 0.00184
+  cos min 0.999864 mean 0.999934
+OVERALL vith14_f16_cpu median-of-medians: 5367.7 ms over 4 images
+backend: CPU (CPU) mem free 16238 MB / total 16238 MB
+graph: 950 nodes; unsupported on CPU: none
+weights: 1268.3 MB in CPU buffer, loaded in 381 ms
+shapes: RESULT backend=CPU fa=0 iters=2 median_ms=4258.3 min_ms=4172.3 mean_ms=4215.3 weights_MB=677 rss_MB=726 hwm_MB=726
+noise: RESULT backend=CPU fa=0 iters=2 median_ms=4000.4 min_ms=3983.7 mean_ms=3992.1 weights_MB=677 rss_MB=726 hwm_MB=726
+checker: RESULT backend=CPU fa=0 iters=2 median_ms=3979.9 min_ms=3965.4 mean_ms=3972.7 weights_MB=677 rss_MB=725 hwm_MB=725
+t1: RESULT backend=CPU fa=0 iters=2 median_ms=3986.8 min_ms=3968.6 mean_ms=3977.7 weights_MB=677 rss_MB=725 hwm_MB=725
+  cos shapes: 0.999872  maxabs 0.00242
+  cos noise: 0.999865  maxabs 0.00267
+  cos checker: 0.999931  maxabs 0.00121
+  cos t1: 0.999790  maxabs 0.00284
+  cos min 0.999790 mean 0.999864
+OVERALL vith14_q8_cpu median-of-medians: 3986.8 ms over 4 images
+backend: CPU (CPU) mem free 16238 MB / total 16238 MB
+graph: 950 nodes; unsupported on CPU: none
+weights: 677.3 MB in CPU buffer, loaded in 125 ms
+### frigate-detector fallback check
+0
+CHAIN2_DONE

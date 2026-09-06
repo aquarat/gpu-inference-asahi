@@ -1,0 +1,30 @@
+start 2026-09-06T07:45:23Z arm=patched
+
+1501 requests ok, 0 timeouts, 0 error replies, 60.0 s, 25.0 req/s
+round-trip latency: avg=36.64 ms  min=25.60  p50=36.37  p95=43.04  p99=45.77  max=57.09
+2026-09-06 08:45:23,678 - __main__ - INFO - Cleanup completed
+2026-09-06 08:45:23,685 - backends - INFO - [ncnn-vulkan] Vulkan device 0: Apple M1 (G13G B1) (api 0x404167, driver 0x6802063), fp16=True
+2026-09-06 08:45:24,743 - backends - INFO - [ncnn-vulkan] using cached ncnn model ~/frigate/research/vk-dispatch/detector-models/fox-person-cat-320.ncnn.param
+2026-09-06 08:45:24,886 - backends - INFO - [ncnn-vulkan] loaded fox-person-cat-320.onnx: inputs [('images', [1, 3, 320, 320])] outputs [('output0', [1, 7, 2100])] (655 layers)
+2026-09-06 08:45:24,927 - backends - INFO - [ncnn-vulkan] warm-up ok: outputs [((1, 7, 2100), 'float32')]
+2026-09-06 08:45:25,902 - backends - INFO - [ncnn-vulkan] using cached ncnn model ~/frigate/research/vk-dispatch/detector-models/fox-person-cat-320.ncnn.param
+2026-09-06 08:45:25,999 - backends - INFO - [ncnn-vulkan] loaded fox-person-cat-320.onnx: inputs [('images', [1, 3, 320, 320])] outputs [('output0', [1, 7, 2100])] (655 layers)
+2026-09-06 08:45:26,027 - backends - INFO - [ncnn-vulkan] warm-up ok: outputs [((1, 7, 2100), 'float32')]
+=== dmesg (gpu/agx) since 2026-09-06T07:45:23Z
+2026-09-05T23:05:23,672836+01:00  __do_fault+0x44/0x1e8
+2026-09-05T23:05:23,672840+01:00  do_read_fault+0x1b0/0x2e8
+2026-09-05T23:05:23,672843+01:00  do_fault+0x160/0x3a8
+2026-09-05T23:05:23,672845+01:00  handle_pte_fault+0x174/0x258
+2026-09-05T23:05:23,672848+01:00  __handle_mm_fault+0x1f8/0x4c8
+2026-09-05T23:05:23,672851+01:00  handle_mm_fault+0xc4/0x320
+2026-09-05T23:05:23,672854+01:00  do_page_fault+0x44c/0x840
+2026-09-05T23:05:23,672859+01:00  do_translation_fault+0x4c/0xa0
+2026-09-05T23:05:23,858964+01:00 Node 0 active_anon:4815296kB inactive_anon:8959984kB active_file:0kB inactive_file:2016kB unevictable:172096kB isolated(anon):0kB isolated(file):0kB mapped:262608kB dirty:32kB writeback:224kB shmem:185152kB shmem_thp:0kB shmem_pmdmapped:0kB anon_thp:950272kB kernel_stack:40768kB pagetables:51200kB sec_pagetables:1088kB all_unreclaimable? yes Balloon:0kB gpu_active:0kB gpu_reclaim:0kB
+2026-09-05T23:05:25,711463+01:00 [ 651260]  1000 651260    19089        2        0        2         0   163840       16             0 timeout
+=== live service journal last 30 min (non-stats)
+=== live service journal stats last 30 min
+Sep 06 08:22:51 <host> frigate-detector[983]: 2026-09-06 08:22:51,532 - __main__ - INFO - Inference stats (ncnn-vulkan(Apple M1 (G13G B1), fp16), fox-person-cat-320.onnx): n=1000 avg=35.8ms max=90.2ms
+Sep 06 08:44:18 <host> frigate-detector[983]: 2026-09-06 08:44:18,668 - __main__ - INFO - Inference stats (ncnn-vulkan(Apple M1 (G13G B1), fp16), fox-person-cat-320.onnx): n=1000 avg=37.4ms max=99.8ms
+ActiveEnterTimestamp=Sat 2026-09-05 17:00:33 BST
+NRestarts=0
+ARM_DONE

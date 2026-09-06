@@ -1,0 +1,73 @@
+[hk] HK_PERFTEST active: 0x80 ()
+[hk gputime] firmware GPU timing active, reporting every 1.00 s (timebase 1000000000 Hz)
+[hk] HK_PERFTEST active: 0x80 ()
+[hk gputime] firmware GPU timing active, reporting every 1.00 s (timebase 1000000000 Hz)
+[hk] HK_PERFTEST active: 0x80 ()
+[hk gputime] firmware GPU timing active, reporting every 1.00 s (timebase 1000000000 Hz)
+[hk] HK_PERFTEST active: 0x80 ()
+[hk gputime] firmware GPU timing active, reporting every 1.00 s (timebase 1000000000 Hz)
+[hk gputime] 1.01 s wall   0 frames  0.0 fps
+[hk gputime]   vtx        0.0 ms    0.0% of wall       0 cmds      0.0 us each
+[hk gputime]   frag       0.0 ms    0.0% of wall       0 cmds      0.0 us each
+[hk gputime]   comp     408.3 ms   40.4% of wall     485 cmds    842.0 us each
+[hk gputime]   dispatch origin: app 1927, meta 0, gs/prerast 0, tess 0, precomp 762  (recorded 2689)
+[hk gputime]   CDM commands built 2010, timestamped 486, intervals harvested 485, isolate splits 0
+[hk gputime]   30877 dispatches (63.7/cmd, 13.2 us each)  0 draws
+[hk gputime]   subqueue waits: compute 2010/2010 crossed, render 0/0 crossed  (uncrossed commands may overlap the other engine)
+[hk gputime]   pipeline barriers 2486 (0.0/frame): 42 compute-only (0.0/frame ending real work), 0 compute-only but gfx open, 2444 need the hammer
+[hk gputime]   GPU busy (union) 408.3 ms = 40.4% of wall
+[hk gputime]   GPU idle 595.8 ms in 484 gaps (0.0/frame, largest 366675 us)
+[hk gputime]     <10us 0 (0.0 ms)   <100us 32 (0.7 ms)   <1ms 401 (125.9 ms)   >=1ms 51 (469.2 ms)
+[hk gputime]   1524 command(s) not profiled (app claimed the timestamp slot)
+[hk gputime]   top compute shaders (99 live, 1.802 Gcycle estimated total, 408.3 ms measured over single-shader streams)
+[hk gputime]     id   kind  disp/fr  invoc/fr   est%     meas ms/fr   meas%    cyc  inst  gprs   thr  loop spill:fill  scrat    wg stage spirv
+[hk gputime]     4    app        0.0          0     1.1%      0.00   99.0%     83   102    21  1024     0    0:0         0   256 CS    2b26d1c84ad6
+[hk gputime]     2    app        0.0          0     0.4%      0.00    0.5%     10    14    23  1024     0    0:0         0   256 CS    3f47b38ec80b
+[hk gputime]     3    app        0.0          0     1.6%      0.00    0.5%     89   110    23  1024     0    0:0         0   256 CS    d4d2eea3d7ab
+[hk gputime]     0    app        0.0          0     0.4%      0.00    0.1%    110   144    31  1024     0    0:0         0   256 CS    fb9db5356b8c
+[hk gputime]     94   app        0.0          0    26.6%      0.00    0.0%    223   340    39  1024     3    0:0         0   256 CS    8670b7b3bdde
+[hk gputime]     66   app        0.0          0     6.6%      0.00    0.0%    216   222    31  1024     0    0:0         0   256 CS    1f93c08b8d17
+[hk gputime]     67   app        0.0          0     3.9%      0.00    0.0%    292   339   111   896     0    0:0         0    64 CS    300dbba9eea8
+[hk gputime]     20   app        0.0          0     3.2%      0.00    0.0%     48    52    31  1024     0    0:0         0   256 CS    31dfe24aafe0
+[hk gputime]     68   app        0.0          0     2.5%      0.00    0.0%    194   229   111   896     0    0:0         0    64 CS    d3dc8c4b57c6
+[hk gputime]     14   app        0.0          0     2.5%      0.00    0.0%    127   153    95  1024     1    0:0         0   128 CS    acd6f9554a03
+[hk gputime]     11   app        0.0          0     2.3%      0.00    0.0%    127   153    95  1024     1    0:0         0   128 CS    acd6f9554a03
+[hk gputime]     5    app        0.0          0     2.2%      0.00    0.0%     54    61    15  1024     0    0:0         0   256 CS    cc1769f94fd5
+[hk gputime]     8    app        0.0          0     1.9%      0.00    0.0%    127   153    95  1024     1    0:0         0   128 CS    acd6f9554a03
+[hk gputime]     15   app        0.0          0     1.6%      0.00    0.0%    127   153    95  1024     1    0:0         0    32 CS    acd6f9554a03
+[hk gputime]     22   app        0.0          0     1.5%      0.00    0.0%    127   153    95  1024     1    0:0         0    64 CS    acd6f9554a03
+[hk gputime]     17   app        0.0          0     1.4%      0.00    0.0%    127   153    95  1024     1    0:0         0   128 CS    acd6f9554a03
+[hk gputime]     16   app        0.0          0     1.4%      0.00    0.0%    127   153    95  1024     1    0:0         0    64 CS    acd6f9554a03
+[hk gputime]     9    app        0.0          0     1.4%      0.00    0.0%    127   153    95  1024     1    0:0         0    32 CS    acd6f9554a03
+[hk gputime]     19   app        0.0          0     1.3%      0.00    0.0%    115   123    39  1024     0    0:0         0   256 CS    f7edc8b1c127
+[hk gputime]     10   app        0.0          0     1.3%      0.00    0.0%    127   153    95  1024     1    0:0         0    64 CS    acd6f9554a03
+[hk gputime]   driver helper kernels: 762 dispatches (0.0/frame) across 1 kernels
+[hk gputime]     reset_query                   0.0 disp/fr           0 invoc/fr  100.0%
+[hk gputime] 1.03 s wall   0 frames  0.0 fps
+[hk gputime]   vtx        0.0 ms    0.0% of wall       0 cmds      0.0 us each
+[hk gputime]   frag       0.0 ms    0.0% of wall       0 cmds      0.0 us each
+[hk gputime]   comp     907.2 ms   88.2% of wall     254 cmds   3571.5 us each
+[hk gputime]   dispatch origin: app 0, meta 0, gs/prerast 0, tess 0, precomp 0  (recorded 0)
+[hk gputime]   CDM commands built 254, timestamped 254, intervals harvested 254, isolate splits 0
+[hk gputime]   66554 dispatches (262.0/cmd, 13.6 us each)  0 draws
+[hk gputime]   subqueue waits: compute 254/254 crossed, render 0/0 crossed  (uncrossed commands may overlap the other engine)
+[hk gputime]   pipeline barriers 0 (0.0/frame): 0 compute-only (0.0/frame ending real work), 0 compute-only but gfx open, 0 need the hammer
+[hk gputime]   GPU busy (union) 907.2 ms = 88.2% of wall
+[hk gputime]   GPU idle 120.1 ms in 253 gaps (0.0/frame, largest 4675 us)
+[hk gputime]     <10us 0 (0.0 ms)   <100us 82 (1.8 ms)   <1ms 144 (63.0 ms)   >=1ms 27 (55.3 ms)
+[hk gputime] 1.02 s wall   0 frames  0.0 fps
+[hk gputime]   vtx        0.0 ms    0.0% of wall       0 cmds      0.0 us each
+[hk gputime]   frag       0.0 ms    0.0% of wall       0 cmds      0.0 us each
+[hk gputime]   comp     795.3 ms   78.1% of wall     217 cmds   3665.0 us each
+[hk gputime]   dispatch origin: app 0, meta 0, gs/prerast 0, tess 0, precomp 0  (recorded 0)
+[hk gputime]   CDM commands built 217, timestamped 217, intervals harvested 217, isolate splits 0
+[hk gputime]   56377 dispatches (259.8/cmd, 14.1 us each)  0 draws
+[hk gputime]   subqueue waits: compute 217/217 crossed, render 0/0 crossed  (uncrossed commands may overlap the other engine)
+[hk gputime]   pipeline barriers 0 (0.0/frame): 0 compute-only (0.0/frame ending real work), 0 compute-only but gfx open, 0 need the hammer
+[hk gputime]   GPU busy (union) 795.3 ms = 78.1% of wall
+[hk gputime]   GPU idle 222.7 ms in 216 gaps (0.0/frame, largest 10365 us)
+[hk gputime]     <10us 0 (0.0 ms)   <100us 67 (1.4 ms)   <1ms 77 (43.4 ms)   >=1ms 72 (177.9 ms)
+CPU Group: [ 0  1  2  3 ], 600000 - 2064000
+CPU Group: [ 4  5  6  7 ], 600000 - 2988000
+The device supports: i8sdot:1, fp16:1, i8mm: 0, sve2: 0, sme2: 0, perfCores: 0
+MNN type=7 prec=2 mode=0x204: median 12.50 ms p95 16.31 min 11.37 max 22.67 -> 80.0 fps | cpu 0.50 ms/iter | wall 13.0 ms/iter (out 16800 elems)

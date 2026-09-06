@@ -1,0 +1,10 @@
+ModuleNotFoundError: No module named 'onnxsim'
+optimizeLevel 0: 510 ops; {'Convolution': 186, 'SILU': 179, 'ADD': 44, 'Concat': 31, 'Const': 18, 'StridedSlice': 18}
+optimizeLevel 1: 510 ops; {'Convolution': 186, 'SILU': 179, 'ADD': 44, 'Concat': 31, 'Const': 18, 'StridedSlice': 18}
+optimizeLevel 2: 510 ops; {'Convolution': 186, 'SILU': 179, 'ADD': 44, 'Concat': 31, 'Const': 18, 'StridedSlice': 18}
+4075992 fox_fp16.mnn
+8009348 fox_opt0.mnn
+8009348 fox_opt1.mnn
+8009348 fox_opt2.mnn
+7b953571d302c3d78644b2b3c713139e  fox_opt1.mnn
+6f95b6652d8475172607e4ee53daa762  fox-person-cat-320.mnn

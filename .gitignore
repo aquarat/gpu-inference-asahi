@@ -1,0 +1,27 @@
+# models, references, outputs and binaries are never committed
+*.gguf
+*.onnx
+*.mnn
+*.param
+*.bin
+*.npy
+*.spv
+*.data
+*.so
+*.rpm
+ggml/clip_vit
+ggml/llama.cpp/
+ggml/SPIRV-Headers/
+ggml/prefix/
+ggml/venv/
+ggml/out/
+ggml/ref/
+ggml/models/
+ggml/images/
+vk-dispatch/tests/chaintest
+vk-dispatch/patched-mesa/
+vk-dispatch/upstream-mesa/
+vk-dispatch/rpms/
+vk-dispatch/rpmdb/
+vk-dispatch/detector-models/
+__pycache__/

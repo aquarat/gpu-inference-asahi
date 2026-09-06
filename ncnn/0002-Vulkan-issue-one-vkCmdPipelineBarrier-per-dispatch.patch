@@ -1,0 +1,115 @@
+From 4049775b3124e339b2cac46f840e2a4ac0307915 Mon Sep 17 00:00:00 2001
+From: Aaron <blue@aquarat.co.uk>
+Date: Sun, 6 Sep 2026 10:28:29 +0100
+Subject: [PATCH 2/2] Vulkan: issue one vkCmdPipelineBarrier per dispatch
+ instead of one per buffer binding
+
+VkCompute::record_pipeline called barrier_readwrite() for every buffer binding,
+i.e. one vkCmdPipelineBarrier call per bottom/top blob before each dispatch
+(2-3 calls per dispatch, ~1700-2000 per YOLOv9-t 320 inference). Drivers that
+implement every barrier as a control-stream break / cache flush (Mesa
+Honeykrisp on Apple AGX counts each one as a full 'compute-only, ending real
+work' barrier) then pay several drains for one dependency.
+
+Collect the VkBufferMemoryBarrier of every buffer binding that needs one and
+record them with a single vkCmdPipelineBarrier whose srcStageMask is the OR of
+the bindings' stage flags (the delayed-record path for devices without
+VK_KHR_push_descriptor is kept). Image bindings are unchanged.
+
+YOLOv9-t 320 fp16 on an Apple M1: ~1680 -> ~580 barrier calls per inference
+(for ~740 dispatches), output bit-identical (fp16 and fp32); the latency
+effect was within the noise of the shared GPU on this machine (median 24.2 vs
+23.9-29.6 ms across interleaved passes, best 19.4 vs 20.5 ms).
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VXX3uBLex4GVki947Lm5qV
+---
+ src/command.cpp | 58 ++++++++++++++++++++++++++++++++++++++++++++++++-
+ 1 file changed, 57 insertions(+), 1 deletion(-)
+
+diff --git a/src/command.cpp b/src/command.cpp
+index 1b9978b..9b83647 100644
+--- a/src/command.cpp
++++ b/src/command.cpp
+@@ -1281,6 +1281,17 @@ void VkCompute::record_pipeline(const Pipeline* pipeline, const std::vector<VkMa
+         NCNN_LOGE("push_constant_count not match, expect %d but got %d", shader_info.push_constant_count, constant_count);
+     }
+ 
++    // Collect the buffer barriers of all bindings into one vkCmdPipelineBarrier.
++    // One call per binding (the old behaviour) makes drivers that implement every
++    // barrier as a full pipeline drain pay 2-3 drains per dispatch.
++    VkBufferMemoryBarrier* buffer_barriers = 0;
++    int buffer_barrier_count = 0;
++    VkPipelineStageFlags buffer_barrier_src_stage = 0;
++    if (buffer_binding_count > 0)
++    {
++        buffer_barriers = new VkBufferMemoryBarrier[buffer_binding_count];
++    }
++
+     int buffer_index = 0;
+     int image_index = 0;
+     for (int i = 0; i < binding_count; i++)
+@@ -1294,7 +1305,26 @@ void VkCompute::record_pipeline(const Pipeline* pipeline, const std::vector<VkMa
+ 
+             //             NCNN_LOGE("binding #%d buffer = %d %d %d %d @ %lu %d = %p +%ld ~%ld", i, binding.dims, binding.w, binding.h, binding.c, binding.elemsize, binding.elempack, binding.buffer(), binding.buffer_offset(), binding.buffer_capacity());
+ 
+-            barrier_readwrite(binding);
++            if (binding.data->access_flags & VK_ACCESS_SHADER_WRITE_BIT || binding.data->stage_flags != VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT)
++            {
++                // barrier device any @ compute/null to shader-readwrite @ compute
++                VkBufferMemoryBarrier& barrier = buffer_barriers[buffer_barrier_count++];
++                barrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
++                barrier.pNext = 0;
++                barrier.srcAccessMask = binding.data->access_flags;
++                barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
++                barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++                barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
++                barrier.buffer = binding.buffer();
++                barrier.offset = binding.buffer_offset();
++                barrier.size = binding.buffer_capacity();
++
++                buffer_barrier_src_stage |= binding.data->stage_flags;
++
++                // mark device shader-readwrite @ compute
++                binding.data->access_flags = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
++                binding.data->stage_flags = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
++            }
+         }
+         else if (binding_type == 2)
+         {
+@@ -1339,6 +1369,32 @@ void VkCompute::record_pipeline(const Pipeline* pipeline, const std::vector<VkMa
+         }
+     }
+ 
++    if (buffer_barrier_count > 0)
++    {
++        VkPipelineStageFlags dst_stage = VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
++
++        if (vkdev->info.support_VK_KHR_push_descriptor())
++        {
++            vkCmdPipelineBarrier(d->compute_command_buffer, buffer_barrier_src_stage, dst_stage, 0, 0, 0, buffer_barrier_count, buffer_barriers, 0, 0);
++            delete[] buffer_barriers;
++        }
++        else
++        {
++            VkComputePrivate::record r;
++            r.type = VkComputePrivate::record::TYPE_buffer_barrers;
++            r.command_buffer = d->compute_command_buffer;
++            r.buffer_barrers.src_stage = buffer_barrier_src_stage;
++            r.buffer_barrers.dst_stage = dst_stage;
++            r.buffer_barrers.barrier_count = buffer_barrier_count;
++            r.buffer_barrers.barriers = buffer_barriers;
++            d->delayed_records.push_back(r);
++        }
++    }
++    else
++    {
++        delete[] buffer_barriers;
++    }
++
+     // record bind pipeline
+     {
+         if (vkdev->info.support_VK_KHR_push_descriptor())
+-- 
+2.55.0
+

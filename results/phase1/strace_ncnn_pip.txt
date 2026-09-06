@@ -1,0 +1,12 @@
+strace: Process 1311881 attached
+strace: Process 1311882 attached
+strace: Process 1311883 attached
+strace: Process 1311886 attached
+strace: Process 1311885 attached
+strace: Process 1311884 attached
+strace: Process 1311888 attached
+strace: Process 1311887 attached
+strace: Process 1311889 attached
+ncnn fox-person-cat-320-opt gpu=1 fp16=1 {}: median 27.41 ms p95 36.76 min 25.14 max 50.98 -> 36.5 fps | cpu 3.89 ms/iter | wall 28.4 ms/iter (out (8, 2100))
+% time     seconds  usecs/call     calls    errors syscall
+------ ----------- ----------- --------- --------- ----------------

@@ -1,0 +1,69 @@
+### stock run1 :: clpeak --latency --vulkan --vk-device 0
+Backend: Vulkan
+  Device 0: Apple M1 (G13G B1)
+    Driver version   : 26.1.8
+    API version      : 1.4.354
+    VRAM             : 7742 MB
+
+    Kernel launch latency (US)
+      dispatch  : 81.94
+      roundtrip : 158.85
+
+### patched run1 :: ~/frigate/research/vk-dispatch/with-patched.sh clpeak --latency --vulkan --vk-device 0
+Backend: Vulkan
+[hk] HK_PERFTEST active: 0x80 ()
+  Device 0: Apple M1 (G13G B1)
+    Driver version   : 26.2.99
+    API version      : 1.4.359
+    VRAM             : 7742 MB
+
+    Kernel launch latency (US)
+      dispatch  : 79.58
+      roundtrip : 158.26
+
+### stock run2 :: clpeak --latency --vulkan --vk-device 0
+Backend: Vulkan
+  Device 0: Apple M1 (G13G B1)
+    Driver version   : 26.1.8
+    API version      : 1.4.354
+    VRAM             : 7742 MB
+
+    Kernel launch latency (US)
+      dispatch  : 92.34
+      roundtrip : 180.50
+
+### patched run2 :: ~/frigate/research/vk-dispatch/with-patched.sh clpeak --latency --vulkan --vk-device 0
+Backend: Vulkan
+[hk] HK_PERFTEST active: 0x80 ()
+  Device 0: Apple M1 (G13G B1)
+    Driver version   : 26.2.99
+    API version      : 1.4.359
+    VRAM             : 7742 MB
+
+    Kernel launch latency (US)
+      dispatch  : 77.56
+      roundtrip : 153.91
+
+### stock run3 :: clpeak --latency --vulkan --vk-device 0
+Backend: Vulkan
+  Device 0: Apple M1 (G13G B1)
+    Driver version   : 26.1.8
+    API version      : 1.4.354
+    VRAM             : 7742 MB
+
+    Kernel launch latency (US)
+      dispatch  : 79.09
+      roundtrip : 158.71
+
+### patched run3 :: ~/frigate/research/vk-dispatch/with-patched.sh clpeak --latency --vulkan --vk-device 0
+Backend: Vulkan
+[hk] HK_PERFTEST active: 0x80 ()
+  Device 0: Apple M1 (G13G B1)
+    Driver version   : 26.2.99
+    API version      : 1.4.359
+    VRAM             : 7742 MB
+
+    Kernel launch latency (US)
+      dispatch  : 82.24
+      roundtrip : 163.68
+

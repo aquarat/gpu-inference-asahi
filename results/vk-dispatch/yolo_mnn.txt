@@ -1,0 +1,56 @@
+### stock pass1 prec1 :: ./bench_mnn_cpp mnn_models/fox-person-cat-320.mnn 7 1 input_320.bin ~/frigate/research/vk-dispatch/results/mnn_out_stock_p1_pass1.bin 100
+CPU Group: [ 0  1  2  3 ], 600000 - 2064000
+CPU Group: [ 4  5  6  7 ], 600000 - 2988000
+The device supports: i8sdot:1, fp16:1, i8mm: 0, sve2: 0, sme2: 0, perfCores: 0
+MNN type=7 prec=1: median 20.38 ms p95 23.24 min 19.71 -> 49.1 fps (out 16800 elems)
+### patched pass1 prec1 :: ~/frigate/research/vk-dispatch/with-patched.sh ./bench_mnn_cpp mnn_models/fox-person-cat-320.mnn 7 1 input_320.bin ~/frigate/research/vk-dispatch/results/mnn_out_patched_p1_pass1.bin 100
+[hk] HK_PERFTEST active: 0x80 ()
+[hk] HK_PERFTEST active: 0x80 ()
+[hk] HK_PERFTEST active: 0x80 ()
+[hk] HK_PERFTEST active: 0x80 ()
+CPU Group: [ 0  1  2  3 ], 600000 - 2064000
+CPU Group: [ 4  5  6  7 ], 600000 - 2988000
+The device supports: i8sdot:1, fp16:1, i8mm: 0, sve2: 0, sme2: 0, perfCores: 0
+MNN type=7 prec=1: median 20.20 ms p95 22.50 min 19.49 -> 49.5 fps (out 16800 elems)
+### stock pass1 prec2 :: ./bench_mnn_cpp mnn_models/fox-person-cat-320.mnn 7 2 input_320.bin ~/frigate/research/vk-dispatch/results/mnn_out_stock_p2_pass1.bin 100
+CPU Group: [ 0  1  2  3 ], 600000 - 2064000
+CPU Group: [ 4  5  6  7 ], 600000 - 2988000
+The device supports: i8sdot:1, fp16:1, i8mm: 0, sve2: 0, sme2: 0, perfCores: 0
+MNN type=7 prec=2: median 18.99 ms p95 22.07 min 18.19 -> 52.7 fps (out 16800 elems)
+### patched pass1 prec2 :: ~/frigate/research/vk-dispatch/with-patched.sh ./bench_mnn_cpp mnn_models/fox-person-cat-320.mnn 7 2 input_320.bin ~/frigate/research/vk-dispatch/results/mnn_out_patched_p2_pass1.bin 100
+[hk] HK_PERFTEST active: 0x80 ()
+[hk] HK_PERFTEST active: 0x80 ()
+[hk] HK_PERFTEST active: 0x80 ()
+[hk] HK_PERFTEST active: 0x80 ()
+CPU Group: [ 0  1  2  3 ], 600000 - 2064000
+CPU Group: [ 4  5  6  7 ], 600000 - 2988000
+The device supports: i8sdot:1, fp16:1, i8mm: 0, sve2: 0, sme2: 0, perfCores: 0
+MNN type=7 prec=2: median 19.00 ms p95 21.37 min 17.64 -> 52.6 fps (out 16800 elems)
+### stock pass2 prec1 :: ./bench_mnn_cpp mnn_models/fox-person-cat-320.mnn 7 1 input_320.bin ~/frigate/research/vk-dispatch/results/mnn_out_stock_p1_pass2.bin 100
+CPU Group: [ 0  1  2  3 ], 600000 - 2064000
+CPU Group: [ 4  5  6  7 ], 600000 - 2988000
+The device supports: i8sdot:1, fp16:1, i8mm: 0, sve2: 0, sme2: 0, perfCores: 0
+MNN type=7 prec=1: median 20.51 ms p95 24.27 min 19.56 -> 48.8 fps (out 16800 elems)
+### patched pass2 prec1 :: ~/frigate/research/vk-dispatch/with-patched.sh ./bench_mnn_cpp mnn_models/fox-person-cat-320.mnn 7 1 input_320.bin ~/frigate/research/vk-dispatch/results/mnn_out_patched_p1_pass2.bin 100
+[hk] HK_PERFTEST active: 0x80 ()
+[hk] HK_PERFTEST active: 0x80 ()
+[hk] HK_PERFTEST active: 0x80 ()
+[hk] HK_PERFTEST active: 0x80 ()
+CPU Group: [ 0  1  2  3 ], 600000 - 2064000
+CPU Group: [ 4  5  6  7 ], 600000 - 2988000
+The device supports: i8sdot:1, fp16:1, i8mm: 0, sve2: 0, sme2: 0, perfCores: 0
+MNN type=7 prec=1: median 20.13 ms p95 22.45 min 19.40 -> 49.7 fps (out 16800 elems)
+### stock pass2 prec2 :: ./bench_mnn_cpp mnn_models/fox-person-cat-320.mnn 7 2 input_320.bin ~/frigate/research/vk-dispatch/results/mnn_out_stock_p2_pass2.bin 100
+CPU Group: [ 0  1  2  3 ], 600000 - 2064000
+CPU Group: [ 4  5  6  7 ], 600000 - 2988000
+The device supports: i8sdot:1, fp16:1, i8mm: 0, sve2: 0, sme2: 0, perfCores: 0
+MNN type=7 prec=2: median 18.90 ms p95 22.29 min 18.02 -> 52.9 fps (out 16800 elems)
+### patched pass2 prec2 :: ~/frigate/research/vk-dispatch/with-patched.sh ./bench_mnn_cpp mnn_models/fox-person-cat-320.mnn 7 2 input_320.bin ~/frigate/research/vk-dispatch/results/mnn_out_patched_p2_pass2.bin 100
+[hk] HK_PERFTEST active: 0x80 ()
+[hk] HK_PERFTEST active: 0x80 ()
+[hk] HK_PERFTEST active: 0x80 ()
+[hk] HK_PERFTEST active: 0x80 ()
+CPU Group: [ 0  1  2  3 ], 600000 - 2064000
+CPU Group: [ 4  5  6  7 ], 600000 - 2988000
+The device supports: i8sdot:1, fp16:1, i8mm: 0, sve2: 0, sme2: 0, perfCores: 0
+MNN type=7 prec=2: median 19.01 ms p95 21.89 min 18.05 -> 52.6 fps (out 16800 elems)
