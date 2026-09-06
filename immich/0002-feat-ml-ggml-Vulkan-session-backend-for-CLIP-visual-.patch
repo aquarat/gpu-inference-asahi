@@ -1,0 +1,747 @@
+From 87565ec44e4ae14496a2da2a1dfc96abb2f8a54c Mon Sep 17 00:00:00 2001
+From: Aaron <blue@aquarat.co.uk>
+Date: Sun, 6 Sep 2026 11:03:16 +0100
+Subject: [PATCH 2/3] feat(ml): ggml Vulkan session backend for CLIP visual
+ models
+
+Adds a GgmlSession that runs CLIP image encoders on the GPU through
+libclipvit (ggml + Vulkan) while the text tower, facial recognition and OCR
+stay on ONNX Runtime. It follows the ArmNN and RKNN session layout:
+
+- sessions/ggml/loader.py: ctypes binding for libclipvit.so; the backend is
+  available when the library loads and a Vulkan GPU is present
+- sessions/ggml/convert.py: converts the open_clip visual ONNX Immich already
+  downloads (including external data, memory-mapped) into a GGUF with f16 or
+  Q8_0 weights, so the weights are exactly those of the ONNX session.
+  Unsupported architectures raise UnsupportedModelError
+- ModelFormat.GGUF, chosen by default for CLIP visual models when the backend
+  is available; the GGUF is produced on first load next to the ONNX file and
+  regenerated when the weight type setting changes. Models that cannot be
+  converted fall back to ONNX like other formats
+- settings: MACHINE_LEARNING_GGML, GGML_PRECISION (FP32/FP16 shader math),
+  GGML_WEIGHT_TYPE (f16/q8_0), GGML_FLASH_ATTN, GGML_THREADS; the GPU index
+  comes from MACHINE_LEARNING_DEVICE_ID
+- pyproject: ggml extra (onnxruntime + gguf), tests for format selection and
+  the session
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VXX3uBLex4GVki947Lm5qV
+---
+ machine-learning/conftest.py                  |  11 +
+ machine-learning/immich_ml/config.py          |   6 +
+ machine-learning/immich_ml/models/base.py     |   6 +
+ .../immich_ml/models/clip/visual.py           |  18 +-
+ machine-learning/immich_ml/schemas.py         |   1 +
+ .../immich_ml/sessions/ggml/__init__.py       |  67 ++++++
+ .../immich_ml/sessions/ggml/convert.py        | 197 ++++++++++++++++++
+ .../immich_ml/sessions/ggml/loader.py         | 115 ++++++++++
+ machine-learning/pyproject.toml               |   1 +
+ machine-learning/test_main.py                 |  64 ++++++
+ machine-learning/uv.lock                      |  23 +-
+ 11 files changed, 506 insertions(+), 3 deletions(-)
+ create mode 100644 machine-learning/immich_ml/sessions/ggml/__init__.py
+ create mode 100644 machine-learning/immich_ml/sessions/ggml/convert.py
+ create mode 100644 machine-learning/immich_ml/sessions/ggml/loader.py
+
+diff --git a/machine-learning/conftest.py b/machine-learning/conftest.py
+index a5acc05..615a4d8 100644
+--- a/machine-learning/conftest.py
++++ b/machine-learning/conftest.py
+@@ -147,6 +147,17 @@ def rknn_session() -> Iterator[mock.Mock]:
+         yield mocked
+ 
+ 
++@pytest.fixture(scope="function")
++def clipvit() -> Iterator[mock.Mock]:
++    with mock.patch("immich_ml.sessions.ggml.ClipVit") as mocked:
++        mocked.return_value.image_size = 224
++        mocked.return_value.embed_dim = 512
++        mocked.return_value.device_name = "Vulkan0"
++        mocked.return_value.weights_bytes = 0
++        mocked.return_value.unsupported_ops = 0
++        yield mocked
++
++
+ @pytest.fixture(scope="function")
+ def rmtree() -> Iterator[mock.Mock]:
+     with mock.patch("immich_ml.models.base.rmtree", autospec=True) as mocked:
+diff --git a/machine-learning/immich_ml/config.py b/machine-learning/immich_ml/config.py
+index d1e44fd..74687a5 100644
+--- a/machine-learning/immich_ml/config.py
++++ b/machine-learning/immich_ml/config.py
+@@ -4,6 +4,7 @@ import os
+ import sys
+ from pathlib import Path
+ from socket import socket
++from typing import Literal
+ 
+ from gunicorn.arbiter import Arbiter
+ from pydantic import BaseModel, Field
+@@ -70,6 +71,11 @@ class Settings(BaseSettings):
+     ann_tuning_level: int = 2
+     rknn: bool = True
+     rknn_threads: int = 1
++    ggml: bool = True
++    ggml_precision: ModelPrecision = ModelPrecision.FP32
++    ggml_weight_type: Literal["f16", "q8_0"] = "f16"
++    ggml_flash_attn: bool = True
++    ggml_threads: int = 4
+     preload: PreloadModelData | None = None
+     max_batch_size: MaxBatchSize | None = None
+     openvino_precision: ModelPrecision = ModelPrecision.FP32
+diff --git a/machine-learning/immich_ml/models/base.py b/machine-learning/immich_ml/models/base.py
+index 5c40b21..8a36214 100644
+--- a/machine-learning/immich_ml/models/base.py
++++ b/machine-learning/immich_ml/models/base.py
+@@ -8,6 +8,7 @@ from typing import Any, ClassVar
+ from huggingface_hub import snapshot_download
+ 
+ import immich_ml.sessions.ann.loader
++import immich_ml.sessions.ggml as ggml
+ import immich_ml.sessions.rknn as rknn
+ from immich_ml.sessions.ort import OrtSession
+ 
+@@ -69,6 +70,7 @@ class InferenceModel(ABC):
+         ignored_patterns: dict[ModelFormat, list[str]] = {
+             ModelFormat.ONNX: ["*.armnn", "*.rknn"],
+             ModelFormat.ARMNN: ["*.rknn"],
++            ModelFormat.GGUF: ["*.armnn", "*.rknn"],
+             ModelFormat.RKNN: ["*.armnn"],
+         }
+ 
+@@ -111,6 +113,8 @@ class InferenceModel(ABC):
+         match model_path.suffix:
+             case ".armnn":
+                 session: ModelSession = AnnSession(model_path)
++            case ".gguf":
++                session = ggml.GgmlSession(model_path)
+             case ".onnx":
+                 session = OrtSession(model_path)
+             case ".rknn":
+@@ -172,5 +176,7 @@ class InferenceModel(ABC):
+             return ModelFormat.RKNN
+         elif immich_ml.sessions.ann.loader.is_available and settings.ann:
+             return ModelFormat.ARMNN
++        elif ggml.is_available and self.identity == (ModelType.VISUAL, ModelTask.SEARCH):
++            return ModelFormat.GGUF
+         else:
+             return ModelFormat.ONNX
+diff --git a/machine-learning/immich_ml/models/clip/visual.py b/machine-learning/immich_ml/models/clip/visual.py
+index 1d46d8f..079879e 100644
+--- a/machine-learning/immich_ml/models/clip/visual.py
++++ b/machine-learning/immich_ml/models/clip/visual.py
+@@ -8,7 +8,7 @@ import numpy as np
+ from numpy.typing import NDArray
+ from PIL import Image
+ 
+-from immich_ml.config import log
++from immich_ml.config import log, settings
+ from immich_ml.models.base import InferenceModel
+ from immich_ml.models.transforms import (
+     crop_pil,
+@@ -19,7 +19,7 @@ from immich_ml.models.transforms import (
+     serialize_np_array,
+     to_numpy,
+ )
+-from immich_ml.schemas import ModelSession, ModelTask, ModelType
++from immich_ml.schemas import ModelFormat, ModelSession, ModelTask, ModelType
+ 
+ 
+ class BaseCLIPVisualEncoder(InferenceModel):
+@@ -67,8 +67,22 @@ class OpenClipVisualEncoder(BaseCLIPVisualEncoder):
+         self.mean = np.array(self.preprocess_cfg["mean"], dtype=np.float32)
+         self.std = np.array(self.preprocess_cfg["std"], dtype=np.float32)
+ 
++        if self.model_format == ModelFormat.GGUF:
++            self._convert_to_gguf()
+         return super()._load()
+ 
++    def _convert_to_gguf(self) -> None:
++        from immich_ml.sessions.ggml.convert import UnsupportedModelError, convert_visual_model, gguf_weight_type
++
++        if self.model_path.is_file() and gguf_weight_type(self.model_path) == settings.ggml_weight_type:
++            return
++        log.info(f"Converting CLIP visual model '{self.model_name}' to GGUF ({settings.ggml_weight_type})")
++        try:
++            convert_visual_model(self.cache_dir, self.model_path, settings.ggml_weight_type)
++        except UnsupportedModelError as e:
++            log.warning(f"CLIP model '{self.model_name}' cannot be converted for ggml: {e}")
++            raise FileNotFoundError(f"Model file not found: {self.model_path}") from e
++
+     def transform(self, image: Image.Image) -> dict[str, NDArray[np.float32]]:
+         image = resize_pil(image, self.size)
+         image = crop_pil(image, self.size)
+diff --git a/machine-learning/immich_ml/schemas.py b/machine-learning/immich_ml/schemas.py
+index 0dcc540..f4052ee 100644
+--- a/machine-learning/immich_ml/schemas.py
++++ b/machine-learning/immich_ml/schemas.py
+@@ -40,6 +40,7 @@ class ModelType(StrEnum):
+ 
+ class ModelFormat(StrEnum):
+     ARMNN = "armnn"
++    GGUF = "gguf"
+     ONNX = "onnx"
+     RKNN = "rknn"
+ 
+diff --git a/machine-learning/immich_ml/sessions/ggml/__init__.py b/machine-learning/immich_ml/sessions/ggml/__init__.py
+new file mode 100644
+index 0000000..e7a1b45
+--- /dev/null
++++ b/machine-learning/immich_ml/sessions/ggml/__init__.py
+@@ -0,0 +1,67 @@
++from __future__ import annotations
++
++from pathlib import Path
++from typing import Any, NamedTuple
++
++import numpy as np
++from numpy.typing import NDArray
++
++from immich_ml.config import log, settings
++from immich_ml.schemas import ModelPrecision, SessionNode
++
++from .loader import ClipVit, is_available
++
++
++class GgmlSession:
++    """
++    Runs CLIP visual models on the GPU through ggml (Vulkan), as a drop-in replacement for an ONNX session.
++    """
++
++    def __init__(self, model_path: Path) -> None:
++        self.model_path = model_path
++        log.info("Loading ggml model %s ...", model_path)
++        self.model = ClipVit(
++            model_path,
++            device=int(settings.device_id),
++            n_threads=settings.ggml_threads,
++            flash_attn=settings.ggml_flash_attn,
++            fp32_math=settings.ggml_precision == ModelPrecision.FP32,
++        )
++        log.info(
++            "Loaded ggml model on %s (%.0f MB of weights, %s math)",
++            self.model.device_name,
++            self.model.weights_bytes / 1e6,
++            settings.ggml_precision.value,
++        )
++        if self.model.unsupported_ops:
++            log.warning(
++                "%d graph nodes are not supported by the GPU and will run on the CPU", self.model.unsupported_ops
++            )
++
++    def get_inputs(self) -> list[SessionNode]:
++        return [GgmlNode("image", (1, 3, self.model.image_size, self.model.image_size))]
++
++    def get_outputs(self) -> list[SessionNode]:
++        return [GgmlNode("embedding", (1, self.model.embed_dim))]
++
++    def get_metadata(self) -> dict[str, str]:
++        return {}
++
++    def run(
++        self,
++        output_names: list[str] | None,
++        input_feed: dict[str, NDArray[np.float32]] | dict[str, NDArray[np.int32]] | dict[str, NDArray[np.uint8]],
++        run_options: Any = None,
++    ) -> list[NDArray[np.float32]]:
++        if len(input_feed) != 1:
++            raise ValueError(f"expected a single image input, got {list(input_feed)}")
++        image: NDArray[np.float32] = np.ascontiguousarray(next(iter(input_feed.values())), dtype=np.float32)
++        return [self.model.encode(image)]
++
++
++class GgmlNode(NamedTuple):
++    name: str
++    shape: tuple[int, ...]
++
++
++__all__ = ["GgmlSession", "GgmlNode", "is_available"]
+diff --git a/machine-learning/immich_ml/sessions/ggml/convert.py b/machine-learning/immich_ml/sessions/ggml/convert.py
+new file mode 100644
+index 0000000..826e7a7
+--- /dev/null
++++ b/machine-learning/immich_ml/sessions/ggml/convert.py
+@@ -0,0 +1,197 @@
++"""Converts an open_clip visual ONNX export into a GGUF file for libclipvit.
++
++The weights are read straight from the ONNX file Immich already downloads (including external data
++files, memory-mapped), so the GGUF holds exactly the weights the ONNX session would serve. Supported
++models are open_clip VisionTransformer exports: conv1 patch embedding, class and positional embeddings,
++ln_pre, N residual attention blocks with a fused in_proj and a c_fc/c_proj MLP, ln_post on the class
++token and visual.proj (ViT-B-32, ViT-B-16, ViT-L-14, ViT-H-14, ...). SigLIP and other architectures
++raise UnsupportedModelError so the caller can fall back to ONNX.
++"""
++
++from __future__ import annotations
++
++import json
++import os
++from pathlib import Path
++from typing import Any, Literal
++
++import numpy as np
++import onnx
++from numpy.typing import NDArray
++
++WeightType = Literal["f16", "q8_0"]
++WEIGHT_TYPE_KEY = "clip-vit.weight_type"
++
++
++class UnsupportedModelError(ValueError):
++    pass
++
++
++def gguf_weight_type(path: Path) -> str | None:
++    """Returns the weight type recorded in a GGUF written by convert_visual_model, or None."""
++    from gguf import GGUFReader
++
++    try:
++        field = GGUFReader(path).fields.get(WEIGHT_TYPE_KEY)
++    except (OSError, ValueError):
++        return None
++    if field is None:
++        return None
++    return bytes(field.parts[field.data[0]]).decode()
++
++
++class _OnnxWeights:
++    def __init__(self, onnx_path: Path) -> None:
++        self.onnx_path = onnx_path
++        self.model = onnx.load(onnx_path.as_posix(), load_external_data=False)
++        self.graph = self.model.graph
++        self.initializers = {t.name: t for t in self.graph.initializer}
++        self.nodes = {n.name: n for n in self.graph.node}
++
++    def load(self, name: str) -> NDArray[np.float32]:
++        tensor = self.initializers.get(name)
++        if tensor is None:
++            raise UnsupportedModelError(f"initializer {name} not found")
++        if tensor.data_location == onnx.TensorProto.EXTERNAL:
++            info = {kv.key: kv.value for kv in tensor.external_data}
++            path = self.onnx_path.parent / info["location"]
++            offset = int(info.get("offset", 0))
++            length = int(info.get("length", os.path.getsize(path) - offset))
++            dtype = onnx.helper.tensor_dtype_to_np_dtype(tensor.data_type)
++            data = np.memmap(path, dtype=dtype, mode="r", offset=offset, shape=(length // np.dtype(dtype).itemsize,))
++            return np.asarray(data, dtype=np.float32).reshape(list(tensor.dims))
++        return np.asarray(onnx.numpy_helper.to_array(tensor), dtype=np.float32)
++
++    def matmul_weight(self, node_name: str) -> NDArray[np.float32]:
++        """The weight of a MatMul/Gemm node, in [out, in] (torch Linear) layout."""
++        node = self.nodes.get(node_name)
++        if node is None or node.op_type not in ("MatMul", "Gemm"):
++            raise UnsupportedModelError(f"node {node_name} not found")
++        weights = [i for i in node.input if i in self.initializers]
++        if not weights:
++            raise UnsupportedModelError(f"node {node_name} has no constant weight")
++        arr = self.load(weights[0])
++        if node.op_type == "Gemm":
++            trans_b = [onnx.helper.get_attribute_value(a) for a in node.attribute if a.name == "transB"]
++            return arr if trans_b and trans_b[0] else arr.T
++        return arr.T
++
++    def initializer_input(self, node_name: str) -> NDArray[np.float32]:
++        node = self.nodes.get(node_name)
++        if node is None:
++            raise UnsupportedModelError(f"node {node_name} not found")
++        names = [i for i in node.input if i in self.initializers]
++        if not names:
++            raise UnsupportedModelError(f"node {node_name} has no constant input")
++        return self.load(names[0])
++
++    def count_ops(self, op_type: str) -> int:
++        return sum(1 for n in self.graph.node if n.op_type == op_type)
++
++    def layer_norm_eps(self) -> float:
++        for node in self.graph.node:
++            if node.op_type == "LayerNormalization":
++                for attr in node.attribute:
++                    if attr.name == "epsilon":
++                        return float(onnx.helper.get_attribute_value(attr))
++        raise UnsupportedModelError("no LayerNormalization node found")
++
++
++def convert_visual_model(model_dir: Path, output: Path, weight_type: WeightType = "f16") -> None:
++    """Writes `output` from `<model_dir>/config.json`, `<model_dir>/visual/model.onnx` and `preprocess_cfg.json`."""
++    import gguf
++    from gguf import GGMLQuantizationType
++
++    onnx_path = model_dir / "visual" / "model.onnx"
++    try:
++        cfg: dict[str, Any] = json.load((model_dir / "config.json").open(encoding="utf-8"))
++        preprocess: dict[str, Any] = json.load((model_dir / "visual" / "preprocess_cfg.json").open(encoding="utf-8"))
++        vision_cfg = cfg["vision_cfg"]
++        width, layers = int(vision_cfg["width"]), int(vision_cfg["layers"])
++        patch, image_size = int(vision_cfg["patch_size"]), int(vision_cfg["image_size"])
++        heads = width // int(vision_cfg.get("head_width", 64))
++        embed_dim = int(cfg["embed_dim"])
++    except (OSError, KeyError, TypeError, ValueError) as e:
++        raise UnsupportedModelError(f"not an open_clip vision transformer config: {e}") from e
++
++    weights = _OnnxWeights(onnx_path)
++    n_sigmoid, n_erf = weights.count_ops("Sigmoid"), weights.count_ops("Erf")
++    if n_sigmoid == layers and n_erf == 0:
++        gelu = "quick"
++    elif n_erf == layers and n_sigmoid == 0:
++        gelu = "erf"
++    else:
++        raise UnsupportedModelError(f"cannot determine the GELU variant (sigmoid={n_sigmoid}, erf={n_erf})")
++    ln_eps = weights.layer_norm_eps()
++
++    class_embd = weights.initializer_input("/visual/Expand").reshape(-1)
++    pos_embd = weights.initializer_input("/visual/Add")
++    n_pos = (image_size // patch) ** 2 + 1
++    if class_embd.shape != (width,) or pos_embd.shape != (n_pos, width):
++        raise UnsupportedModelError(f"unexpected embedding shapes {class_embd.shape}, {pos_embd.shape}")
++
++    tmp_output = output.with_name(output.name + ".tmp")
++    writer = gguf.GGUFWriter(tmp_output.as_posix(), "clip-vit")
++    try:
++        writer.add_name(model_dir.name)
++        writer.add_description("open_clip VisionTransformer converted from ONNX for libclipvit")
++        writer.add_file_type(gguf.LlamaFileType.MOSTLY_Q8_0 if weight_type == "q8_0" else gguf.LlamaFileType.MOSTLY_F16)
++        writer.add_string(WEIGHT_TYPE_KEY, weight_type)
++        writer.add_uint32("clip-vit.width", width)
++        writer.add_uint32("clip-vit.layers", layers)
++        writer.add_uint32("clip-vit.heads", heads)
++        writer.add_uint32("clip-vit.patch_size", patch)
++        writer.add_uint32("clip-vit.image_size", image_size)
++        writer.add_uint32("clip-vit.embed_dim", embed_dim)
++        writer.add_float32("clip-vit.ln_eps", ln_eps)
++        writer.add_string("clip-vit.gelu", gelu)
++        writer.add_array("clip-vit.image_mean", [float(x) for x in preprocess["mean"]])
++        writer.add_array("clip-vit.image_std", [float(x) for x in preprocess["std"]])
++
++        def add(name: str, arr: NDArray[np.float32], kind: Literal["mat", "f16", "f32"]) -> None:
++            arr = np.ascontiguousarray(arr, dtype=np.float32)
++            if kind == "f32":
++                writer.add_tensor(name, arr)
++            elif kind == "mat" and weight_type == "q8_0" and arr.shape[-1] % 32 == 0:
++                writer.add_tensor(
++                    name, gguf.quants.quantize(arr, GGMLQuantizationType.Q8_0), raw_dtype=GGMLQuantizationType.Q8_0
++                )
++            else:
++                writer.add_tensor(name, arr.astype(np.float16))
++
++        add("patch_w", weights.load("visual.conv1.weight"), "f16")
++        add("class_embd", class_embd, "f32")
++        add("pos_embd", pos_embd, "f32")
++        add("ln_pre_w", weights.load("visual.ln_pre.weight"), "f32")
++        add("ln_pre_b", weights.load("visual.ln_pre.bias"), "f32")
++        for i in range(layers):
++            p, q = f"visual.transformer.resblocks.{i}", f"/visual/transformer/resblocks.{i}"
++            add(f"blk.{i}.ln1_w", weights.load(f"{p}.ln_1.weight"), "f32")
++            add(f"blk.{i}.ln1_b", weights.load(f"{p}.ln_1.bias"), "f32")
++            add(f"blk.{i}.qkv_w", weights.matmul_weight(f"{q}/attn/MatMul"), "mat")
++            add(f"blk.{i}.qkv_b", weights.load(f"{p}.attn.in_proj_bias"), "f32")
++            add(f"blk.{i}.out_w", weights.load(f"{p}.attn.out_proj.weight"), "mat")
++            add(f"blk.{i}.out_b", weights.load(f"{p}.attn.out_proj.bias"), "f32")
++            add(f"blk.{i}.ln2_w", weights.load(f"{p}.ln_2.weight"), "f32")
++            add(f"blk.{i}.ln2_b", weights.load(f"{p}.ln_2.bias"), "f32")
++            add(f"blk.{i}.fc1_w", weights.matmul_weight(f"{q}/mlp/c_fc/MatMul"), "mat")
++            add(f"blk.{i}.fc1_b", weights.load(f"{p}.mlp.c_fc.bias"), "f32")
++            add(f"blk.{i}.fc2_w", weights.matmul_weight(f"{q}/mlp/c_proj/MatMul"), "mat")
++            add(f"blk.{i}.fc2_b", weights.load(f"{p}.mlp.c_proj.bias"), "f32")
++        add("ln_post_w", weights.load("visual.ln_post.weight"), "f32")
++        add("ln_post_b", weights.load("visual.ln_post.bias"), "f32")
++        add("proj_w", weights.load("visual.proj").T, "mat")
++
++        writer.write_header_to_file()
++        writer.write_kv_data_to_file()
++        writer.write_tensors_to_file()
++    except UnsupportedModelError:
++        writer.close()
++        tmp_output.unlink(missing_ok=True)
++        raise
++    except BaseException:
++        writer.close()
++        tmp_output.unlink(missing_ok=True)
++        raise
++    writer.close()
++    tmp_output.replace(output)
+diff --git a/machine-learning/immich_ml/sessions/ggml/loader.py b/machine-learning/immich_ml/sessions/ggml/loader.py
+new file mode 100644
+index 0000000..5175175
+--- /dev/null
++++ b/machine-learning/immich_ml/sessions/ggml/loader.py
+@@ -0,0 +1,115 @@
++from __future__ import annotations
++
++import os
++from ctypes import CDLL, POINTER, Structure, byref, c_char_p, c_float, c_int, c_size_t, c_void_p
++from pathlib import Path
++
++import numpy as np
++from numpy.typing import NDArray
++
++from immich_ml.config import log, settings
++from immich_ml.schemas import ModelPrecision
++
++
++class ClipVitParams(Structure):
++    _fields_ = [("device", c_int), ("n_threads", c_int), ("flash_attn", c_int), ("fp32_math", c_int)]
++
++
++try:
++    if not settings.ggml:
++        raise OSError("disabled by MACHINE_LEARNING_GGML=false")
++    if settings.ggml_precision == ModelPrecision.FP32:
++        # must be set before the Vulkan backend initialises (i.e. before the library is loaded)
++        os.environ.setdefault("GGML_VK_DISABLE_F16", "1")
++    libclipvit = CDLL("libclipvit.so")
++    libclipvit.clipvit_params_default.argtypes = (POINTER(ClipVitParams),)
++    libclipvit.clipvit_device_count.restype = c_int
++    libclipvit.clipvit_device_description.argtypes = (c_int,)
++    libclipvit.clipvit_device_description.restype = c_char_p
++    libclipvit.clipvit_load.argtypes = c_char_p, POINTER(ClipVitParams)
++    libclipvit.clipvit_load.restype = c_void_p
++    libclipvit.clipvit_free.argtypes = (c_void_p,)
++    libclipvit.clipvit_encode.argtypes = c_void_p, POINTER(c_float), c_int, POINTER(c_float)
++    libclipvit.clipvit_encode.restype = c_int
++    libclipvit.clipvit_embed_dim.argtypes = (c_void_p,)
++    libclipvit.clipvit_embed_dim.restype = c_int
++    libclipvit.clipvit_image_size.argtypes = (c_void_p,)
++    libclipvit.clipvit_image_size.restype = c_int
++    libclipvit.clipvit_device_name.argtypes = (c_void_p,)
++    libclipvit.clipvit_device_name.restype = c_char_p
++    libclipvit.clipvit_weights_bytes.argtypes = (c_void_p,)
++    libclipvit.clipvit_weights_bytes.restype = c_size_t
++    libclipvit.clipvit_unsupported_ops.argtypes = (c_void_p,)
++    libclipvit.clipvit_unsupported_ops.restype = c_int
++    libclipvit.clipvit_last_error.restype = c_char_p
++    device_count: int = libclipvit.clipvit_device_count()
++    is_available = device_count > 0
++    if is_available:
++        devices = [libclipvit.clipvit_device_description(i).decode() for i in range(device_count)]
++        log.info("Found ggml GPU devices: %s", devices)
++    else:
++        log.debug("libclipvit is available but no GPU device was found, using ONNX")
++except OSError as e:
++    log.debug("Could not load libclipvit, using ONNX: %s", e)
++    is_available = False
++
++
++def last_error() -> str:
++    error: bytes = libclipvit.clipvit_last_error()
++    return error.decode(errors="replace")
++
++
++class ClipVit:
++    """A CLIP vision transformer loaded from a GGUF file onto a ggml backend."""
++
++    def __init__(
++        self,
++        model_path: Path | str,
++        device: int = 0,
++        n_threads: int = 4,
++        flash_attn: bool = True,
++        fp32_math: bool = False,
++    ) -> None:
++        if not is_available:
++            raise RuntimeError("libclipvit is not available!")
++        params = ClipVitParams()
++        libclipvit.clipvit_params_default(byref(params))
++        params.device = device
++        params.n_threads = n_threads
++        params.flash_attn = int(flash_attn)
++        params.fp32_math = int(fp32_math)
++        self.model: int | None = libclipvit.clipvit_load(str(model_path).encode(), byref(params))
++        if self.model is None:
++            raise ValueError(f"Cannot load model {model_path}: {last_error()}")
++        self.embed_dim: int = libclipvit.clipvit_embed_dim(self.model)
++        self.image_size: int = libclipvit.clipvit_image_size(self.model)
++        self.device_name: str = libclipvit.clipvit_device_name(self.model).decode()
++        self.weights_bytes: int = libclipvit.clipvit_weights_bytes(self.model)
++        self.unsupported_ops: int = libclipvit.clipvit_unsupported_ops(self.model)
++
++    def __del__(self) -> None:
++        self.free()
++
++    def free(self) -> None:
++        if getattr(self, "model", None) is not None:
++            libclipvit.clipvit_free(self.model)
++            self.model = None
++
++    def encode(self, images: NDArray[np.float32]) -> NDArray[np.float32]:
++        if self.model is None:
++            raise RuntimeError("model has been freed")
++        expected = (3, self.image_size, self.image_size)
++        if images.ndim != 4 or images.shape[1:] != expected:
++            raise ValueError(f"expected images of shape (N, {', '.join(map(str, expected))}), got {images.shape}")
++        if images.dtype != np.float32 or not images.flags.c_contiguous:
++            raise ValueError("images must be a C-contiguous float32 array")
++        out: NDArray[np.float32] = np.empty((images.shape[0], self.embed_dim), dtype=np.float32)
++        status: int = libclipvit.clipvit_encode(
++            self.model,
++            images.ctypes.data_as(POINTER(c_float)),
++            images.shape[0],
++            out.ctypes.data_as(POINTER(c_float)),
++        )
++        if status != 0:
++            raise RuntimeError(f"ggml inference failed: {last_error()}")
++        return out
+diff --git a/machine-learning/pyproject.toml b/machine-learning/pyproject.toml
+index f0d388b..e114a2e 100644
+--- a/machine-learning/pyproject.toml
++++ b/machine-learning/pyproject.toml
+@@ -51,6 +51,7 @@ cpu = ["onnxruntime>=1.23.2,<2"]
+ cuda = ["onnxruntime-gpu>=1.23.2,<2"]
+ openvino = ["onnxruntime-openvino>=1.24.1,<2"]
+ armnn = ["onnxruntime>=1.23.2,<2"]
++ggml = ["onnxruntime>=1.23.2,<2", "gguf>=0.17.0"]
+ rknn = ["onnxruntime>=1.23.2,<2", "rknn-toolkit-lite2>=2.3.0,<3"]
+ rocm = ["onnxruntime-migraphx>=1.23.2,<2"]
+ 
+diff --git a/machine-learning/test_main.py b/machine-learning/test_main.py
+index a50bea0..088c92b 100644
+--- a/machine-learning/test_main.py
++++ b/machine-learning/test_main.py
+@@ -29,6 +29,7 @@ from immich_ml.models.ocr.detection import TextDetector
+ from immich_ml.models.ocr.recognition import TextRecognizer
+ from immich_ml.schemas import ModelFormat, ModelPrecision, ModelTask, ModelType
+ from immich_ml.sessions.ann import AnnSession
++from immich_ml.sessions.ggml import GgmlSession
+ from immich_ml.sessions.ort import OrtSession
+ from immich_ml.sessions.rknn import RknnSession, run_inference
+ 
+@@ -108,6 +109,19 @@ class TestBase:
+ 
+         assert encoder.model_format == ModelFormat.RKNN
+ 
++    def test_sets_default_model_format_to_gguf_for_clip_visual_if_available(self, mocker: MockerFixture) -> None:
++        mocker.patch.object(settings, "ann", False)
++        mocker.patch("immich_ml.sessions.rknn.is_available", False)
++        mocker.patch("immich_ml.sessions.ggml.is_available", True)
++
++        visual = OpenClipVisualEncoder("ViT-B-32__openai")
++        textual = OpenClipTextualEncoder("ViT-B-32__openai")
++        detector = FaceDetector("buffalo_s")
++
++        assert visual.model_format == ModelFormat.GGUF
++        assert textual.model_format == ModelFormat.ONNX
++        assert detector.model_format == ModelFormat.ONNX
++
+     def test_casts_cache_dir_string_to_path(self) -> None:
+         cache_dir = "/test_cache"
+         encoder = OpenClipTextualEncoder("ViT-B-32__openai", cache_dir=cache_dir)
+@@ -542,6 +556,56 @@ class TestAnnSession:
+         np_spy.assert_has_calls([mock.call(input1), mock.call(input2)])
+ 
+ 
++class TestGgmlSession:
++    def test_creates_ggml_session(self, clipvit: mock.Mock, info: mock.Mock, mocker: MockerFixture) -> None:
++        mocker.patch.object(settings, "ggml_precision", ModelPrecision.FP16)
++        mocker.patch.object(settings, "ggml_threads", 2)
++        mocker.patch.object(settings, "ggml_flash_attn", False)
++        mocker.patch.dict(os.environ, {"MACHINE_LEARNING_DEVICE_ID": "1"})
++        model_path = Path("model.gguf")
++
++        GgmlSession(model_path)
++
++        clipvit.assert_called_once_with(model_path, device=1, n_threads=2, flash_attn=False, fp32_math=False)
++        info.assert_any_call("Loading ggml model %s ...", model_path)
++
++    def test_passes_fp32_math(self, clipvit: mock.Mock, mocker: MockerFixture) -> None:
++        mocker.patch.object(settings, "ggml_precision", ModelPrecision.FP32)
++
++        GgmlSession(Path("model.gguf"))
++
++        assert clipvit.call_args.kwargs["fp32_math"] is True
++
++    def test_get_inputs_and_outputs(self, clipvit: mock.Mock) -> None:
++        session = GgmlSession(Path("model.gguf"))
++
++        [input] = session.get_inputs()
++        [output] = session.get_outputs()
++
++        assert input.name == "image"
++        assert input.shape == (1, 3, 224, 224)
++        assert output.name == "embedding"
++        assert output.shape == (1, 512)
++
++    def test_run(self, clipvit: mock.Mock, mocker: MockerFixture) -> None:
++        np_spy = mocker.spy(np, "ascontiguousarray")
++        session = GgmlSession(Path("model.gguf"))
++        image = np.random.rand(1, 3, 224, 224).astype(np.float32)
++
++        [output] = session.run(None, {"image": image})
++
++        clipvit.return_value.encode.assert_called_once()
++        assert output is clipvit.return_value.encode.return_value
++        np_spy.assert_called_once_with(image, dtype=np.float32)
++
++    def test_run_rejects_multiple_inputs(self, clipvit: mock.Mock) -> None:
++        session = GgmlSession(Path("model.gguf"))
++        image = np.random.rand(1, 3, 224, 224).astype(np.float32)
++
++        with pytest.raises(ValueError):
++            session.run(None, {"image": image, "other": image})
++
++
+ class TestRknnSession:
+     def test_creates_rknn_session(self, rknn_session: mock.Mock, info: mock.Mock, mocker: MockerFixture) -> None:
+         model_path = mock.MagicMock(spec=Path)
+diff --git a/machine-learning/uv.lock b/machine-learning/uv.lock
+index 8381cbb..a8ce815 100644
+--- a/machine-learning/uv.lock
++++ b/machine-learning/uv.lock
+@@ -575,6 +575,21 @@ wheels = [
+     { url = "https://files.pythonhosted.org/packages/54/e3/6b8dbb24e3941e20abbe7736e59290c5d4182057ea1d984d46c853208bcd/geventhttpclient-2.3.1-cp312-cp312-win_amd64.whl", hash = "sha256:7924e0883bc2b177cfe27aa65af6bb9dd57f3e26905c7675a2d1f3ef69df7cca", size = 48271, upload-time = "2024-04-18T21:39:14.479Z" },
+ ]
+ 
++[[package]]
++name = "gguf"
++version = "0.19.0"
++source = { registry = "https://pypi.org/simple" }
++dependencies = [
++    { name = "numpy" },
++    { name = "pyyaml" },
++    { name = "requests" },
++    { name = "tqdm" },
++]
++sdist = { url = "https://files.pythonhosted.org/packages/48/ae/17f1308ae45cd7b08ebb521747d5b23f4efc4d172038a4e228dd5106c3ff/gguf-0.19.0.tar.gz", hash = "sha256:dbadcd6cc7ccd44256f2229fe7c2dff5e8aa5cf0612ab987fd2b1a57e428923f", size = 111220, upload-time = "2026-05-06T13:04:03.667Z" }
++wheels = [
++    { url = "https://files.pythonhosted.org/packages/b3/bb/d71d6da82763528c2c2ed6b59a9d6142c6595545a4c448e2085d155e88c2/gguf-0.19.0-py3-none-any.whl", hash = "sha256:70bcd10edfe697fb2dad6e40af2234b9d8ece9a41a99761405121ebda1c3c1cd", size = 118475, upload-time = "2026-05-06T13:04:02.588Z" },
++]
++
+ [[package]]
+ name = "greenlet"
+ version = "3.1.1"
+@@ -804,6 +819,10 @@ cpu = [
+ cuda = [
+     { name = "onnxruntime-gpu" },
+ ]
++ggml = [
++    { name = "gguf" },
++    { name = "onnxruntime" },
++]
+ openvino = [
+     { name = "onnxruntime-openvino" },
+ ]
+@@ -859,12 +878,14 @@ types = [
+ requires-dist = [
+     { name = "aiocache", specifier = ">=0.12.1,<1.0" },
+     { name = "fastapi", specifier = ">=0.95.2,<1.0" },
++    { name = "gguf", marker = "extra == 'ggml'", specifier = ">=0.17.0" },
+     { name = "gunicorn", specifier = ">=21.1.0" },
+     { name = "huggingface-hub", specifier = ">=1.0,<2.0" },
+     { name = "numpy", specifier = ">=2.4.0,<3.0" },
+     { name = "onnx", specifier = ">=1.22.0" },
+     { name = "onnxruntime", marker = "extra == 'armnn'", specifier = ">=1.23.2,<2" },
+     { name = "onnxruntime", marker = "extra == 'cpu'", specifier = ">=1.23.2,<2" },
++    { name = "onnxruntime", marker = "extra == 'ggml'", specifier = ">=1.23.2,<2" },
+     { name = "onnxruntime", marker = "extra == 'rknn'", specifier = ">=1.23.2,<2" },
+     { name = "onnxruntime-gpu", marker = "extra == 'cuda'", specifier = ">=1.23.2,<2" },
+     { name = "onnxruntime-migraphx", marker = "extra == 'rocm'", specifier = ">=1.23.2,<2" },
+@@ -881,7 +902,7 @@ requires-dist = [
+     { name = "tokenizers", specifier = ">=0.15.0,<1.0" },
+     { name = "uvicorn", extras = ["standard"], specifier = ">=0.22.0,<1.0" },
+ ]
+-provides-extras = ["cpu", "cuda", "openvino", "armnn", "rknn", "rocm"]
++provides-extras = ["cpu", "cuda", "openvino", "armnn", "ggml", "rknn", "rocm"]
+ 
+ [package.metadata.requires-dev]
+ dev = [
+-- 
+2.55.0
+

@@ -1,0 +1,624 @@
+From a68451ab1e5227372b99f6007d238b9f92975ff6 Mon Sep 17 00:00:00 2001
+From: Aaron <blue@aquarat.co.uk>
+Date: Sun, 6 Sep 2026 11:03:16 +0100
+Subject: [PATCH 1/3] feat(ml): add libclipvit, a ggml-based CLIP image encoder
+
+Adds machine-learning/ggml, a small C++ library on the public ggml API that
+runs an open_clip VisionTransformer (patch conv, class/positional embeddings,
+ln_pre, residual attention blocks with fused QKV, ln_post on the class token
+and the visual projection) from a GGUF file on a ggml backend. ggml and its
+Vulkan backend are linked statically, so the runtime only needs
+libclipvit.so, the Vulkan loader and the host's driver.
+
+The C API (clipvit.h) loads a model onto a GPU device (or the CPU), encodes
+preprocessed NCHW float32 images into L2-normalised embeddings, and reports
+the embedding size, image size, device and unsupported ops. clipvit-cli is a
+small driver for tests and benchmarks. build.sh mirrors ann/build.sh.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VXX3uBLex4GVki947Lm5qV
+---
+ machine-learning/ggml/.gitignore      |   1 +
+ machine-learning/ggml/CMakeLists.txt  |  67 ++++++
+ machine-learning/ggml/build.sh        |  11 +
+ machine-learning/ggml/clipvit-cli.cpp |  78 ++++++
+ machine-learning/ggml/clipvit.cpp     | 326 ++++++++++++++++++++++++++
+ machine-learning/ggml/clipvit.h       |  68 ++++++
+ 6 files changed, 551 insertions(+)
+ create mode 100644 machine-learning/ggml/.gitignore
+ create mode 100644 machine-learning/ggml/CMakeLists.txt
+ create mode 100755 machine-learning/ggml/build.sh
+ create mode 100644 machine-learning/ggml/clipvit-cli.cpp
+ create mode 100644 machine-learning/ggml/clipvit.cpp
+ create mode 100644 machine-learning/ggml/clipvit.h
+
+diff --git a/machine-learning/ggml/.gitignore b/machine-learning/ggml/.gitignore
+new file mode 100644
+index 0000000..567609b
+--- /dev/null
++++ b/machine-learning/ggml/.gitignore
+@@ -0,0 +1 @@
++build/
+diff --git a/machine-learning/ggml/CMakeLists.txt b/machine-learning/ggml/CMakeLists.txt
+new file mode 100644
+index 0000000..e4921f4
+--- /dev/null
++++ b/machine-learning/ggml/CMakeLists.txt
+@@ -0,0 +1,67 @@
++# libclipvit: CLIP vision transformer encoder on ggml (Vulkan GPU / CPU), used by
++# immich_ml.sessions.ggml. ggml and its backends are linked statically so the runtime
++# only needs libclipvit.so, the Vulkan loader and the host's Vulkan driver (ICD).
++#
++#   cmake -B build -DCMAKE_BUILD_TYPE=Release [-DCLIPVIT_GGML_DIR=/path/to/ggml]
++#   cmake --build build -j4 && cmake --install build --prefix /opt/clipvit
++cmake_minimum_required(VERSION 3.24)
++project(clipvit LANGUAGES C CXX VERSION 0.1.0)
++
++option(CLIPVIT_VULKAN "Build the ggml Vulkan backend" ON)
++option(CLIPVIT_BUILD_CLI "Build the clipvit-cli test tool" ON)
++set(CLIPVIT_GGML_DIR "" CACHE PATH "Existing ggml source tree (default: fetch ggml-org/ggml at CLIPVIT_GGML_TAG)")
++set(CLIPVIT_GGML_TAG "master" CACHE STRING "ggml git ref to fetch when CLIPVIT_GGML_DIR is empty")
++
++set(CMAKE_CXX_STANDARD 17)
++set(CMAKE_CXX_STANDARD_REQUIRED ON)
++set(CMAKE_POSITION_INDEPENDENT_CODE ON)
++if(NOT CMAKE_BUILD_TYPE)
++    set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
++endif()
++
++# ggml configuration: static libraries compiled into libclipvit.so, no dynamic backend loading.
++set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
++set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)
++set(GGML_VULKAN ${CLIPVIT_VULKAN} CACHE BOOL "" FORCE)
++set(GGML_OPENMP OFF CACHE BOOL "")
++set(GGML_NATIVE OFF CACHE BOOL "")
++set(GGML_BUILD_TESTS OFF CACHE BOOL "" FORCE)
++set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
++set(GGML_ALL_WARNINGS OFF CACHE BOOL "")
++
++if(CLIPVIT_GGML_DIR)
++    add_subdirectory(${CLIPVIT_GGML_DIR} ggml EXCLUDE_FROM_ALL)
++else()
++    include(FetchContent)
++    FetchContent_Declare(ggml
++        GIT_REPOSITORY https://github.com/ggml-org/ggml.git
++        GIT_TAG ${CLIPVIT_GGML_TAG}
++        GIT_SHALLOW TRUE
++        EXCLUDE_FROM_ALL)
++    FetchContent_MakeAvailable(ggml)
++endif()
++
++add_library(clipvit SHARED clipvit.cpp clipvit.h)
++target_link_libraries(clipvit PRIVATE ggml)
++set_target_properties(clipvit PROPERTIES
++    C_VISIBILITY_PRESET hidden
++    CXX_VISIBILITY_PRESET hidden
++    VISIBILITY_INLINES_HIDDEN ON
++    PUBLIC_HEADER clipvit.h)
++if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
++    # keep the ggml symbols private to this library
++    target_link_options(clipvit PRIVATE "LINKER:--exclude-libs,ALL")
++endif()
++
++if(CLIPVIT_BUILD_CLI)
++    add_executable(clipvit-cli clipvit-cli.cpp)
++    target_link_libraries(clipvit-cli PRIVATE clipvit)
++endif()
++
++include(GNUInstallDirs)
++install(TARGETS clipvit
++    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
++    PUBLIC_HEADER DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
++if(CLIPVIT_BUILD_CLI)
++    install(TARGETS clipvit-cli RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
++endif()
+diff --git a/machine-learning/ggml/build.sh b/machine-learning/ggml/build.sh
+new file mode 100755
+index 0000000..58fe54c
+--- /dev/null
++++ b/machine-learning/ggml/build.sh
+@@ -0,0 +1,11 @@
++#!/usr/bin/env sh
++# Builds libclipvit.so (and clipvit-cli) with ggml + its Vulkan backend linked in statically.
++# Requires cmake >= 3.24, a C++17 compiler, the Vulkan headers/loader, glslc and SPIRV-Headers.
++# CLIPVIT_GGML_DIR may point at an existing ggml checkout (default: fetch ggml-org/ggml).
++set -e
++cd "$(dirname "$0")"
++cmake -B build -DCMAKE_BUILD_TYPE=Release \
++    ${CLIPVIT_GGML_DIR:+-DCLIPVIT_GGML_DIR="$CLIPVIT_GGML_DIR"} \
++    ${CLIPVIT_GGML_TAG:+-DCLIPVIT_GGML_TAG="$CLIPVIT_GGML_TAG"} \
++    "$@"
++cmake --build build -j"${JOBS:-4}"
+diff --git a/machine-learning/ggml/clipvit-cli.cpp b/machine-learning/ggml/clipvit-cli.cpp
+new file mode 100644
+index 0000000..abe622b
+--- /dev/null
++++ b/machine-learning/ggml/clipvit-cli.cpp
+@@ -0,0 +1,78 @@
++// Small test/benchmark driver for libclipvit: encodes raw float32 NCHW inputs and writes the embeddings.
++//   clipvit-cli <model.gguf> <out.bin> <input.bin>... [--device N|--cpu] [--threads N] [--no-flash-attn]
++//               [--fp32-math] [--iters N]
++#include "clipvit.h"
++
++#include <algorithm>
++#include <chrono>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <string>
++#include <vector>
++
++static double now_ms() {
++    return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now().time_since_epoch()).count();
++}
++
++int main(int argc, char ** argv) {
++    if (argc < 4) {
++        fprintf(stderr, "usage: %s model.gguf out.bin input.bin... [--device N|--cpu] [--threads N] [--no-flash-attn] [--fp32-math] [--iters N]\n", argv[0]);
++        return 1;
++    }
++    struct clipvit_params params;
++    clipvit_params_default(&params);
++    int iters = 1;
++    std::vector<std::string> inputs;
++    for (int i = 3; i < argc; i++) {
++        const std::string a = argv[i];
++        if (a == "--device" && i + 1 < argc) params.device = atoi(argv[++i]);
++        else if (a == "--cpu") params.device = -1;
++        else if (a == "--threads" && i + 1 < argc) params.n_threads = atoi(argv[++i]);
++        else if (a == "--no-flash-attn") params.flash_attn = 0;
++        else if (a == "--fp32-math") params.fp32_math = 1;
++        else if (a == "--iters" && i + 1 < argc) iters = atoi(argv[++i]);
++        else inputs.push_back(a);
++    }
++    for (int i = 0; i < clipvit_device_count(); i++) fprintf(stderr, "gpu %d: %s\n", i, clipvit_device_description(i));
++
++    const double t0 = now_ms();
++    clipvit_model * model = clipvit_load(argv[1], &params);
++    if (!model) { fprintf(stderr, "load failed: %s\n", clipvit_last_error()); return 1; }
++    fprintf(stderr, "loaded %s on %s in %.0f ms: image %d, dim %d, weights %.0f MB, unsupported ops %d\n", argv[1],
++            clipvit_device_name(model), now_ms() - t0, clipvit_image_size(model), clipvit_embed_dim(model),
++            clipvit_weights_bytes(model) / 1e6, clipvit_unsupported_ops(model));
++
++    const int size = clipvit_image_size(model), dim = clipvit_embed_dim(model);
++    const size_t image_floats = (size_t) 3 * size * size;
++    std::vector<float> image(image_floats), emb(dim);
++    FILE * fout = fopen(argv[2], "wb");
++    if (!fout) { fprintf(stderr, "cannot write %s\n", argv[2]); return 1; }
++    std::vector<double> times;
++    for (const std::string & path : inputs) {
++        FILE * f = fopen(path.c_str(), "rb");
++        if (!f || fread(image.data(), sizeof(float), image_floats, f) != image_floats) {
++            fprintf(stderr, "bad input %s\n", path.c_str());
++            return 1;
++        }
++        fclose(f);
++        for (int it = 0; it < iters; it++) {
++            const double a = now_ms();
++            if (clipvit_encode(model, image.data(), 1, emb.data()) != 0) {
++                fprintf(stderr, "encode failed: %s\n", clipvit_last_error());
++                return 1;
++            }
++            times.push_back(now_ms() - a);
++        }
++        fwrite(emb.data(), sizeof(float), dim, fout);
++        fprintf(stderr, "%s: %.1f ms\n", path.c_str(), times.back());
++    }
++    fclose(fout);
++    std::sort(times.begin(), times.end());
++    if (!times.empty()) {
++        printf("RESULT device=%s images=%zu iters=%d median_ms=%.1f min_ms=%.1f max_ms=%.1f\n", clipvit_device_name(model),
++               inputs.size(), iters, times[times.size() / 2], times.front(), times.back());
++    }
++    clipvit_free(model);
++    return 0;
++}
+diff --git a/machine-learning/ggml/clipvit.cpp b/machine-learning/ggml/clipvit.cpp
+new file mode 100644
+index 0000000..5cf3c40
+--- /dev/null
++++ b/machine-learning/ggml/clipvit.cpp
+@@ -0,0 +1,326 @@
++// ggml implementation of the open_clip VisionTransformer image encoder. See clipvit.h.
++#include "clipvit.h"
++
++#include "ggml-alloc.h"
++#include "ggml-backend.h"
++#include "ggml-cpu.h"
++#include "ggml.h"
++#include "gguf.h"
++
++#include <algorithm>
++#include <cmath>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
++#include <memory>
++#include <mutex>
++#include <stdexcept>
++#include <string>
++#include <vector>
++
++namespace {
++
++thread_local std::string g_last_error;
++
++void set_error(const std::string & msg) { g_last_error = msg; }
++
++struct hparams {
++    int width = 0;
++    int layers = 0;
++    int heads = 0;
++    int patch = 0;
++    int image_size = 0;
++    int embed_dim = 0;
++    float ln_eps = 1e-5f;
++    bool quick_gelu = false;
++};
++
++std::vector<ggml_backend_dev_t> gpu_devices() {
++    std::vector<ggml_backend_dev_t> devs;
++    for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
++        ggml_backend_dev_t dev = ggml_backend_dev_get(i);
++        const enum ggml_backend_dev_type type = ggml_backend_dev_type(dev);
++        if (type == GGML_BACKEND_DEVICE_TYPE_GPU || type == GGML_BACKEND_DEVICE_TYPE_IGPU) {
++            devs.push_back(dev);
++        }
++    }
++    return devs;
++}
++
++}  // namespace
++
++struct clipvit_model {
++    hparams hp;
++    int n_patches = 0;
++    int n_pos = 0;
++    int d_head = 0;
++    bool flash_attn = true;
++
++    gguf_context * gguf = nullptr;
++    ggml_context * weights_ctx = nullptr;
++    ggml_backend_buffer_t weights_buf = nullptr;
++    ggml_backend_t backend = nullptr;
++    ggml_backend_t cpu = nullptr;
++    ggml_backend_sched_t sched = nullptr;
++    size_t graph_size = 0;
++    std::vector<uint8_t> graph_buf;
++    std::string device_name;
++    int unsupported = 0;
++    std::mutex mutex;
++
++    ggml_tensor * inp = nullptr;
++    ggml_tensor * out = nullptr;
++
++    ~clipvit_model() {
++        if (sched) ggml_backend_sched_free(sched);
++        if (weights_buf) ggml_backend_buffer_free(weights_buf);
++        if (backend && backend != cpu) ggml_backend_free(backend);
++        if (cpu) ggml_backend_free(cpu);
++        if (gguf) gguf_free(gguf);
++        if (weights_ctx) ggml_free(weights_ctx);
++    }
++
++    ggml_tensor * weight(const std::string & name) const {
++        ggml_tensor * t = ggml_get_tensor(weights_ctx, name.c_str());
++        if (!t) throw std::runtime_error("missing tensor " + name);
++        return t;
++    }
++
++    void read_hparams() {
++        auto key_u32 = [&](const char * key) {
++            const int64_t id = gguf_find_key(gguf, key);
++            if (id < 0) throw std::runtime_error(std::string("missing metadata ") + key);
++            return (int) gguf_get_val_u32(gguf, id);
++        };
++        hp.width = key_u32("clip-vit.width");
++        hp.layers = key_u32("clip-vit.layers");
++        hp.heads = key_u32("clip-vit.heads");
++        hp.patch = key_u32("clip-vit.patch_size");
++        hp.image_size = key_u32("clip-vit.image_size");
++        hp.embed_dim = key_u32("clip-vit.embed_dim");
++        hp.ln_eps = gguf_get_val_f32(gguf, gguf_find_key(gguf, "clip-vit.ln_eps"));
++        const int64_t gelu = gguf_find_key(gguf, "clip-vit.gelu");
++        hp.quick_gelu = gelu >= 0 && strcmp(gguf_get_val_str(gguf, gelu), "quick") == 0;
++        if (hp.width <= 0 || hp.heads <= 0 || hp.width % hp.heads != 0 || hp.patch <= 0 ||
++            hp.image_size % hp.patch != 0) {
++            throw std::runtime_error("invalid clip-vit hyperparameters");
++        }
++        const int n_px = hp.image_size / hp.patch;
++        n_patches = n_px * n_px;
++        n_pos = n_patches + 1;
++        d_head = hp.width / hp.heads;
++    }
++
++    void load_weights(const char * path) {
++        weights_buf = ggml_backend_alloc_ctx_tensors(weights_ctx, backend);
++        if (!weights_buf) throw std::runtime_error("failed to allocate the weight buffer");
++        FILE * f = fopen(path, "rb");
++        if (!f) throw std::runtime_error(std::string("cannot open ") + path);
++        std::vector<uint8_t> tmp;
++        const size_t base = gguf_get_data_offset(gguf);
++        for (int64_t i = 0; i < gguf_get_n_tensors(gguf); i++) {
++            const char * name = gguf_get_tensor_name(gguf, i);
++            ggml_tensor * t = ggml_get_tensor(weights_ctx, name);
++            const size_t nbytes = ggml_nbytes(t);
++            tmp.resize(nbytes);
++            if (fseek(f, (long) (base + gguf_get_tensor_offset(gguf, i)), SEEK_SET) != 0 ||
++                fread(tmp.data(), 1, nbytes, f) != nbytes) {
++                fclose(f);
++                throw std::runtime_error(std::string("short read for tensor ") + name);
++            }
++            ggml_backend_tensor_set(t, tmp.data(), 0, nbytes);
++        }
++        fclose(f);
++    }
++
++    ggml_tensor * layer_norm(ggml_context * ctx, ggml_tensor * x, const std::string & prefix) const {
++        x = ggml_norm(ctx, x, hp.ln_eps);
++        x = ggml_mul(ctx, x, weight(prefix + "_w"));
++        return ggml_add(ctx, x, weight(prefix + "_b"));
++    }
++
++    // Builds the forward graph for one image. Tensors live in graph_buf (no_alloc), the
++    // scheduler allocates their data.
++    ggml_cgraph * build_graph() {
++        ggml_init_params params = {graph_buf.size(), graph_buf.data(), /*no_alloc*/ true};
++        ggml_context * ctx = ggml_init(params);
++        ggml_cgraph * gf = ggml_new_graph_custom(ctx, graph_size, false);
++
++        // ggml ne0 is the fastest-varying dimension: the NCHW input is [W, H, C, N] here.
++        inp = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, hp.image_size, hp.image_size, 3, 1);
++        ggml_set_name(inp, "image");
++        ggml_set_input(inp);
++
++        ggml_tensor * x = ggml_conv_2d(ctx, weight("patch_w"), inp, hp.patch, hp.patch, 0, 0, 1, 1);
++        x = ggml_reshape_3d(ctx, x, n_patches, hp.width, 1);
++        x = ggml_cont(ctx, ggml_transpose(ctx, x));
++        x = ggml_reshape_2d(ctx, x, hp.width, n_patches);
++        x = ggml_concat(ctx, ggml_reshape_2d(ctx, weight("class_embd"), hp.width, 1), x, 1);
++        x = ggml_add(ctx, x, weight("pos_embd"));
++        x = layer_norm(ctx, x, "ln_pre");
++
++        const float scale = 1.0f / sqrtf((float) d_head);
++        for (int il = 0; il < hp.layers; il++) {
++            const std::string b = "blk." + std::to_string(il) + ".";
++            ggml_tensor * cur = layer_norm(ctx, x, b + "ln1");
++            ggml_tensor * qkv = ggml_add(ctx, ggml_mul_mat(ctx, weight(b + "qkv_w"), cur), weight(b + "qkv_b"));
++            const size_t es = ggml_element_size(qkv);
++            ggml_tensor * q = ggml_view_3d(ctx, qkv, d_head, hp.heads, n_pos, d_head * es, qkv->nb[1], 0);
++            ggml_tensor * k =
++                ggml_view_3d(ctx, qkv, d_head, hp.heads, n_pos, d_head * es, qkv->nb[1], (size_t) hp.width * es);
++            ggml_tensor * v = ggml_view_3d(ctx, qkv, d_head, hp.heads, n_pos, d_head * es, qkv->nb[1],
++                                           (size_t) 2 * hp.width * es);
++            q = ggml_permute(ctx, q, 0, 2, 1, 3);
++            k = ggml_permute(ctx, k, 0, 2, 1, 3);
++            if (flash_attn) {
++                v = ggml_permute(ctx, v, 0, 2, 1, 3);
++                cur = ggml_flash_attn_ext(ctx, q, k, v, nullptr, scale, 0.0f, 0.0f);
++                ggml_flash_attn_ext_set_prec(cur, GGML_PREC_F32);
++                cur = ggml_reshape_2d(ctx, cur, hp.width, n_pos);
++            } else {
++                v = ggml_cont(ctx, ggml_permute(ctx, v, 1, 2, 0, 3));
++                ggml_tensor * kq = ggml_mul_mat(ctx, k, q);
++                kq = ggml_soft_max_ext(ctx, kq, nullptr, scale, 0.0f);
++                ggml_tensor * kqv = ggml_mul_mat(ctx, v, kq);
++                cur = ggml_cont_2d(ctx, ggml_permute(ctx, kqv, 0, 2, 1, 3), hp.width, n_pos);
++            }
++            cur = ggml_add(ctx, ggml_mul_mat(ctx, weight(b + "out_w"), cur), weight(b + "out_b"));
++            x = ggml_add(ctx, x, cur);
++
++            cur = layer_norm(ctx, x, b + "ln2");
++            cur = ggml_add(ctx, ggml_mul_mat(ctx, weight(b + "fc1_w"), cur), weight(b + "fc1_b"));
++            cur = hp.quick_gelu ? ggml_gelu_quick(ctx, cur) : ggml_gelu_erf(ctx, cur);
++            cur = ggml_add(ctx, ggml_mul_mat(ctx, weight(b + "fc2_w"), cur), weight(b + "fc2_b"));
++            x = ggml_add(ctx, x, cur);
++        }
++
++        ggml_tensor * cls = ggml_view_2d(ctx, x, hp.width, 1, x->nb[1], 0);
++        cls = layer_norm(ctx, cls, "ln_post");
++        out = ggml_mul_mat(ctx, weight("proj_w"), cls);
++        ggml_set_name(out, "embedding");
++        ggml_set_output(out);
++        ggml_build_forward_expand(gf, out);
++        ggml_free(ctx);
++        return gf;
++    }
++
++    void count_unsupported() {
++        ggml_cgraph * gf = build_graph();
++        unsupported = 0;
++        for (int i = 0; i < ggml_graph_n_nodes(gf); i++) {
++            if (!ggml_backend_supports_op(backend, ggml_graph_node(gf, i))) unsupported++;
++        }
++    }
++
++    void encode_one(const float * image, float * embedding) {
++        ggml_backend_sched_reset(sched);
++        ggml_cgraph * gf = build_graph();
++        if (!ggml_backend_sched_alloc_graph(sched, gf)) throw std::runtime_error("failed to allocate the graph");
++        ggml_backend_tensor_set(inp, image, 0, ggml_nbytes(inp));
++        if (ggml_backend_sched_graph_compute(sched, gf) != GGML_STATUS_SUCCESS) {
++            throw std::runtime_error("graph compute failed");
++        }
++        ggml_backend_sched_synchronize(sched);
++        ggml_backend_tensor_get(out, embedding, 0, ggml_nbytes(out));
++        double sum_sq = 0.0;
++        for (int i = 0; i < hp.embed_dim; i++) sum_sq += (double) embedding[i] * embedding[i];
++        const float inv = 1.0f / std::max(1e-12f, (float) sqrt(sum_sq));
++        for (int i = 0; i < hp.embed_dim; i++) embedding[i] *= inv;
++    }
++};
++
++extern "C" {
++
++void clipvit_params_default(struct clipvit_params * params) {
++    params->device = 0;
++    params->n_threads = 4;
++    params->flash_attn = 1;
++    params->fp32_math = 0;
++}
++
++int clipvit_device_count(void) { return (int) gpu_devices().size(); }
++
++const char * clipvit_device_description(int index) {
++    const std::vector<ggml_backend_dev_t> devs = gpu_devices();
++    if (index < 0 || index >= (int) devs.size()) return "";
++    return ggml_backend_dev_description(devs[index]);
++}
++
++clipvit_model * clipvit_load(const char * gguf_path, const struct clipvit_params * params) {
++    struct clipvit_params defaults;
++    clipvit_params_default(&defaults);
++    if (!params) params = &defaults;
++    if (params->fp32_math) setenv("GGML_VK_DISABLE_F16", "1", /*overwrite*/ 0);
++
++    std::unique_ptr<clipvit_model> m(new clipvit_model());
++    try {
++        gguf_init_params gp = {/*no_alloc*/ true, &m->weights_ctx};
++        m->gguf = gguf_init_from_file(gguf_path, gp);
++        if (!m->gguf) throw std::runtime_error(std::string("failed to read ") + gguf_path);
++        m->read_hparams();
++        m->flash_attn = params->flash_attn != 0;
++
++        m->cpu = ggml_backend_cpu_init();
++        if (!m->cpu) throw std::runtime_error("failed to initialise the CPU backend");
++        ggml_backend_cpu_set_n_threads(m->cpu, params->n_threads > 0 ? params->n_threads : 4);
++        if (params->device < 0) {
++            m->backend = m->cpu;
++            m->device_name = "CPU";
++        } else {
++            const std::vector<ggml_backend_dev_t> devs = gpu_devices();
++            if (params->device >= (int) devs.size()) {
++                throw std::runtime_error("GPU device " + std::to_string(params->device) + " not found (" +
++                                         std::to_string(devs.size()) + " available)");
++            }
++            m->backend = ggml_backend_dev_init(devs[params->device], nullptr);
++            if (!m->backend) throw std::runtime_error("failed to initialise the GPU backend");
++            m->device_name = std::string(ggml_backend_dev_name(devs[params->device])) + " (" +
++                             ggml_backend_dev_description(devs[params->device]) + ")";
++        }
++
++        m->load_weights(gguf_path);
++
++        ggml_backend_t backends[2] = {m->backend, m->cpu};
++        const int n_backends = m->backend == m->cpu ? 1 : 2;
++        m->graph_size = 4096 + 64 * (size_t) m->hp.layers;
++        m->sched = ggml_backend_sched_new(backends, nullptr, n_backends, m->graph_size, false, true);
++        if (!m->sched) throw std::runtime_error("failed to create the scheduler");
++        m->graph_buf.resize(ggml_tensor_overhead() * m->graph_size + ggml_graph_overhead_custom(m->graph_size, false));
++        m->count_unsupported();
++    } catch (const std::exception & e) {
++        set_error(e.what());
++        return nullptr;
++    }
++    return m.release();
++}
++
++void clipvit_free(clipvit_model * model) { delete model; }
++
++int clipvit_encode(clipvit_model * model, const float * images, int n, float * out) {
++    if (!model || !images || !out || n < 0) {
++        set_error("invalid arguments");
++        return -1;
++    }
++    const size_t image_floats = (size_t) 3 * model->hp.image_size * model->hp.image_size;
++    std::lock_guard<std::mutex> lock(model->mutex);
++    try {
++        for (int i = 0; i < n; i++) {
++            model->encode_one(images + i * image_floats, out + (size_t) i * model->hp.embed_dim);
++        }
++    } catch (const std::exception & e) {
++        set_error(e.what());
++        return -1;
++    }
++    return 0;
++}
++
++int clipvit_embed_dim(const clipvit_model * model) { return model ? model->hp.embed_dim : 0; }
++int clipvit_image_size(const clipvit_model * model) { return model ? model->hp.image_size : 0; }
++const char * clipvit_device_name(const clipvit_model * model) { return model ? model->device_name.c_str() : ""; }
++size_t clipvit_weights_bytes(const clipvit_model * model) {
++    return model && model->weights_buf ? ggml_backend_buffer_get_size(model->weights_buf) : 0;
++}
++int clipvit_unsupported_ops(const clipvit_model * model) { return model ? model->unsupported : 0; }
++const char * clipvit_last_error(void) { return g_last_error.c_str(); }
++
++}  // extern "C"
+diff --git a/machine-learning/ggml/clipvit.h b/machine-learning/ggml/clipvit.h
+new file mode 100644
+index 0000000..57ef925
+--- /dev/null
++++ b/machine-learning/ggml/clipvit.h
+@@ -0,0 +1,68 @@
++// C API for the ggml-based CLIP vision transformer encoder (libclipvit).
++//
++// Loads a GGUF produced by immich_ml.sessions.ggml.convert (an open_clip
++// VisionTransformer: patch conv, class/pos embeddings, ln_pre, N residual
++// attention blocks, ln_post on the class token, visual projection) and encodes
++// preprocessed NCHW float32 images into L2-normalised embeddings on a ggml
++// backend (Vulkan GPU, or the CPU as a fallback).
++#ifndef CLIPVIT_H
++#define CLIPVIT_H
++
++#include <stddef.h>
++
++#ifdef __cplusplus
++extern "C" {
++#endif
++
++#ifdef _WIN32
++#define CLIPVIT_API __declspec(dllexport)
++#else
++#define CLIPVIT_API __attribute__((visibility("default")))
++#endif
++
++typedef struct clipvit_model clipvit_model;
++
++struct clipvit_params {
++    // Index into the GPU devices reported by clipvit_device_count(); -1 runs on the CPU.
++    int device;
++    // Threads for the CPU backend (used for the CPU device and for ops the GPU cannot run).
++    int n_threads;
++    // Use ggml's fused flash attention op (1) or the explicit softmax(QK^T)V path (0).
++    int flash_attn;
++    // Force fp32 shader arithmetic on the Vulkan backend (sets GGML_VK_DISABLE_F16 before
++    // the backend is initialised; process-wide, so it applies to the first model loaded).
++    int fp32_math;
++};
++
++// Fill params with defaults: device 0, 4 threads, flash attention on, fp16 math.
++CLIPVIT_API void clipvit_params_default(struct clipvit_params * params);
++
++// Number of GPU devices (integrated or discrete) ggml can see, and their descriptions.
++CLIPVIT_API int clipvit_device_count(void);
++CLIPVIT_API const char * clipvit_device_description(int index);
++
++// Load a model. Returns NULL on failure; see clipvit_last_error().
++CLIPVIT_API clipvit_model * clipvit_load(const char * gguf_path, const struct clipvit_params * params);
++CLIPVIT_API void clipvit_free(clipvit_model * model);
++
++// Encode n images (n x 3 x S x S float32, S = clipvit_image_size) into out (n x clipvit_embed_dim),
++// L2-normalised. Returns 0 on success. Safe to call from several threads (serialised internally).
++CLIPVIT_API int clipvit_encode(clipvit_model * model, const float * images, int n, float * out);
++
++CLIPVIT_API int clipvit_embed_dim(const clipvit_model * model);
++CLIPVIT_API int clipvit_image_size(const clipvit_model * model);
++// Name of the backend the model runs on, e.g. "Vulkan0 (Apple M1 (G13G B1) (Honeykrisp))".
++CLIPVIT_API const char * clipvit_device_name(const clipvit_model * model);
++// Size of the weight buffer on the device, in bytes.
++CLIPVIT_API size_t clipvit_weights_bytes(const clipvit_model * model);
++// Number of graph nodes the main backend cannot run (they fall back to the CPU); 0 is expected.
++CLIPVIT_API int clipvit_unsupported_ops(const clipvit_model * model);
++
++// Last error message of the calling thread (empty string if none).
++CLIPVIT_API const char * clipvit_last_error(void);
++
++#ifdef __cplusplus
++}
++#endif
++
++#endif
+-- 
+2.55.0
+

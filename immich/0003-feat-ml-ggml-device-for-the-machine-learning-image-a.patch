@@ -1,0 +1,146 @@
+From 655d02bf9d3f0926715431ded039534b1a63ec08 Mon Sep 17 00:00:00 2001
+From: Aaron <blue@aquarat.co.uk>
+Date: Sun, 6 Sep 2026 11:03:16 +0100
+Subject: [PATCH 3/3] feat(ml): ggml device for the machine-learning image and
+ docs
+
+Adds builder-ggml and prod-ggml stages that build libclipvit with a pinned
+ggml and ship it with the Vulkan loader and Mesa's drivers, a ggml entry in
+hwaccel.ml.yml, and documentation for the backend and its settings.
+
+Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VXX3uBLex4GVki947Lm5qV
+---
+ docker/hwaccel.ml.yml                         |  6 ++++++
+ .../docs/features/ml-hardware-acceleration.md | 13 ++++++++++--
+ docs/docs/install/environment-variables.md    |  5 +++++
+ machine-learning/Dockerfile                   | 21 +++++++++++++++++++
+ 4 files changed, 43 insertions(+), 2 deletions(-)
+
+diff --git a/docker/hwaccel.ml.yml b/docker/hwaccel.ml.yml
+index 516385c..8559209 100644
+--- a/docker/hwaccel.ml.yml
++++ b/docker/hwaccel.ml.yml
+@@ -21,6 +21,12 @@ services:
+     devices:
+       - /dev/dri:/dev/dri
+ 
++  ggml:
++    group_add:
++      - video
++    devices:
++      - /dev/dri:/dev/dri
++
+   cpu: {}
+ 
+   cuda:
+diff --git a/docs/docs/features/ml-hardware-acceleration.md b/docs/docs/features/ml-hardware-acceleration.md
+index 5ad0bcd..dbf42b1 100644
+--- a/docs/docs/features/ml-hardware-acceleration.md
++++ b/docs/docs/features/ml-hardware-acceleration.md
+@@ -10,6 +10,7 @@ You do not need to redo any machine learning jobs after enabling hardware accele
+ ## Supported Backends
+ 
+ - ARM NN (Mali)
++- ggml (any Vulkan 1.2+ GPU, e.g. through Mesa; CLIP image embeddings only)
+ - CUDA (NVIDIA GPUs with [compute capability](https://developer.nvidia.com/cuda-gpus) 5.2 or higher)
+ - ROCm (AMD GPUs)
+ - OpenVINO (Intel GPUs such as Iris Xe and Arc)
+@@ -21,6 +22,7 @@ You do not need to redo any machine learning jobs after enabling hardware accele
+ - Only Linux and Windows (through WSL2) servers are supported.
+ - ARM NN is only supported on devices with Mali GPUs. Other Arm devices are not supported.
+ - Some models may not be compatible with certain backends. CUDA is the most reliable.
++- ggml only accelerates CLIP image embeddings (Smart Search jobs). Text search, facial recognition and OCR stay on the CPU.
+ - Search latency isn't improved by ARM NN due to model compatibility issues preventing its use. However, smart search jobs do make use of ARM NN.
+ 
+ ## Prerequisites
+@@ -38,6 +40,13 @@ You do not need to redo any machine learning jobs after enabling hardware accele
+ - Optional: Configure your `.env` file, see [environment variables](/install/environment-variables) for ARM NN specific settings
+   - In particular, the `MACHINE_LEARNING_ANN_FP16_TURBO` can significantly improve performance at the cost of very slightly lower accuracy
+ 
++#### ggml
++
++- A Vulkan driver for your GPU on the host (`/dev/dri` must be available). The image ships Mesa's drivers; for other drivers, bind-mount the driver's ICD file and library and set `VK_DRIVER_FILES` accordingly
++- CLIP models are converted from ONNX to GGUF on first load and cached next to the ONNX file
++- If the GPU is shared with a latency-sensitive workload (e.g. an NVR's object detector), set `GGML_VK_MAX_NODES_PER_SUBMIT=1` in the container's environment: the encoder then submits one graph node at a time so other jobs can interleave, at about 1-2% extra latency
++- Optional: `MACHINE_LEARNING_GGML_PRECISION=FP16` roughly halves latency on GPUs with fp16 support at a very small accuracy cost, `MACHINE_LEARNING_GGML_WEIGHT_TYPE=q8_0` halves GPU memory. See [environment variables](/install/environment-variables)
++
+ #### CUDA
+ 
+ - The GPU must have compute capability 5.2 or greater.
+@@ -88,7 +97,7 @@ You do not need to redo any machine learning jobs after enabling hardware accele
+ ## Setup
+ 
+ 1. If you do not already have it, download the latest [`hwaccel.ml.yml`][hw-file] file and ensure it's in the same folder as the `docker-compose.yml`.
+-2. In `immich-machine-learning`, add one of -[armnn, cuda, rocm, openvino, rknn] to the `image` section's tag at the end of the line.
++2. In `immich-machine-learning`, add one of -[armnn, cuda, ggml, rocm, openvino, rknn] to the `image` section's tag at the end of the line.
+ 3. Still in the `docker-compose.yml` under `immich-machine-learning`, uncomment the `extends` section and change `cpu` to the appropriate backend.
+ 4. Redeploy the `immich-machine-learning` container with these updated settings.
+ 
+@@ -96,7 +105,7 @@ You do not need to redo any machine learning jobs after enabling hardware accele
+ 
+ You can confirm the device is being recognized and used by checking its utilization. There are many tools to display this, such as `nvtop` for NVIDIA or Intel, `intel_gpu_top` for Intel, and `radeontop` for AMD.
+ 
+-You can also check the logs of the `immich-machine-learning` container. When a Smart Search or Face Detection job begins, or when you search with text in Immich, you should either see a log for `Available ORT providers` containing the relevant provider (e.g. `CUDAExecutionProvider` in the case of CUDA), or a `Loaded ANN model` log entry without errors in the case of ARM NN.
++You can also check the logs of the `immich-machine-learning` container. When a Smart Search or Face Detection job begins, or when you search with text in Immich, you should either see a log for `Available ORT providers` containing the relevant provider (e.g. `CUDAExecutionProvider` in the case of CUDA), a `Loaded ANN model` log entry without errors in the case of ARM NN, or a `Loaded ggml model on Vulkan0` entry in the case of ggml.
+ 
+ #### Single Compose File
+ 
+diff --git a/docs/docs/install/environment-variables.md b/docs/docs/install/environment-variables.md
+index c10a858..d3d4e35 100644
+--- a/docs/docs/install/environment-variables.md
++++ b/docs/docs/install/environment-variables.md
+@@ -179,6 +179,11 @@ Redis (Sentinel) URL example JSON before encoding:
+ | `MACHINE_LEARNING_MAX_BATCH_SIZE__OCR`                      | Set the maximum number of boxes that will be processed at once by the OCR model                                                                              |             `6`              | machine learning |
+ | `MACHINE_LEARNING_RKNN`                                     | Enable RKNN hardware acceleration if supported                                                                                                               |            `True`            | machine learning |
+ | `MACHINE_LEARNING_RKNN_THREADS`                             | How many threads of RKNN runtime should be spun up while inferencing.                                                                                        |             `1`              | machine learning |
++| `MACHINE_LEARNING_GGML`                                     | Enable ggml (Vulkan) hardware acceleration for CLIP image models if supported                                                                                |            `True`            | machine learning |
++| `MACHINE_LEARNING_GGML_PRECISION`                           | Model precision for the ggml backend: `FP32` or `FP16` (faster, very slightly lower accuracy)                                                                |            `FP32`            | machine learning |
++| `MACHINE_LEARNING_GGML_WEIGHT_TYPE`                         | Weight storage for the ggml backend: `f16` or `q8_0` (half the GPU memory)                                                                                   |            `f16`             | machine learning |
++| `MACHINE_LEARNING_GGML_FLASH_ATTN`                          | Use the fused flash attention op on the ggml backend                                                                                                         |            `True`            | machine learning |
++| `MACHINE_LEARNING_GGML_THREADS`                             | CPU threads for ggml ops the GPU cannot run                                                                                                                  |             `4`              | machine learning |
+ | `MACHINE_LEARNING_MODEL_ARENA`                              | Pre-allocates CPU memory to avoid memory fragmentation                                                                                                       |             true             | machine learning |
+ | `MACHINE_LEARNING_OPENVINO_PRECISION`                       | If set to FP16, uses half-precision floating-point operations for faster inference with reduced accuracy (one of [`FP16`, `FP32`], applies only to OpenVINO) |            `FP32`            | machine learning |
+ 
+diff --git a/machine-learning/Dockerfile b/machine-learning/Dockerfile
+index c8191e3..6b11a4a 100644
+--- a/machine-learning/Dockerfile
++++ b/machine-learning/Dockerfile
+@@ -18,6 +18,16 @@ RUN mkdir /opt/armnn && \
+     cd /opt/ann && \
+     sh build.sh
+ 
++FROM builder-cpu AS builder-ggml
++
++# renovate: datasource=github-tags depName=ggml-org/ggml
++ARG GGML_VERSION="master"
++
++COPY ggml /opt/clipvit
++RUN apt-get update && apt-get install -y --no-install-recommends cmake git glslc libvulkan-dev spirv-headers && \
++    cd /opt/clipvit && \
++    CLIPVIT_GGML_TAG="${GGML_VERSION}" sh build.sh -DCLIPVIT_BUILD_CLI=OFF
++
+ FROM builder-cpu AS builder-rknn
+ 
+ # Warning: 25GiB+ disk space required to pull this image
+@@ -104,6 +114,17 @@ COPY --from=builder-armnn \
+     /opt/ann/build.sh \
+     /opt/armnn/
+ 
++FROM prod-cpu AS prod-ggml
++
++ENV LD_PRELOAD=/usr/lib/libmimalloc.so.2 \
++    MACHINE_LEARNING_MODEL_ARENA=false
++
++# the Vulkan loader and Mesa's drivers; a vendor driver (ICD) can also be bind-mounted from the host
++RUN apt-get update && apt-get install -y --no-install-recommends libvulkan1 mesa-vulkan-drivers && \
++    rm -rf /var/lib/apt/lists/*
++
++COPY --from=builder-ggml /opt/clipvit/build/libclipvit.so /usr/lib/
++
+ FROM prod-cpu AS prod-rknn
+ 
+ # renovate: datasource=github-tags depName=airockchip/rknn-toolkit2
+-- 
+2.55.0
+
