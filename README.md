@@ -107,6 +107,20 @@ Profiling with the fork's firmware profiler (`HK_GPUTIME=1`), `strace` and
 
 Write-up: [reports/PHASE2_GGML.md](reports/PHASE2_GGML.md); code: [ggml/](ggml/).
 
+## Phase 3: fuse SiLU into MNN's Vulkan convolution epilogue
+
+YOLO-style graphs follow almost every convolution with SiLU, and MNN ran each
+one as its own dispatch (179 of 783 per inference for YOLOv9-t 320). The
+fusion is made at schedule time, inside MNN, when the session is created, so
+it applies to models converted by any converter -- including a detector that
+converts ONNX to `.mnn` at load time with the pip wheel. Dispatches per
+inference 783 -> 604, fp16 median 12.1 -> 11.15 ms, fp32 14.7 -> 14.0 ms;
+fp32 output bit-identical, fp16 slightly closer to the fp32 reference, no
+detection changes on the 45-frame set.
+
+Write-up: [reports/PHASE3_MNN_FUSION.md](reports/PHASE3_MNN_FUSION.md);
+patch: [mnn/0003](mnn/).
+
 The "Vulkan is hopeless for transformers on this driver" conclusion from the
 MNN runs (ViT-H 7 s, 2% of peak) was a runtime finding, not a driver one.
 ggml's Vulkan backend records the graph into one command buffer with minimal
@@ -159,7 +173,7 @@ GGUF and runs the tower in ~250 lines on the public ggml backend API.
 | [ggml/](ggml/) | `convert_clip_onnx_to_gguf.py` (Immich ONNX to GGUF, f16/f32/Q8_0), `clip_vit.cpp` (ggml runner, Vulkan or CPU), the ORT reference/preprocessing script, comparison and benchmark scripts, build notes for llama.cpp `9e0e220`. |
 | [bench/](bench/) | The MNN/ncnn YOLO benchmark sources and the interleaved final A/B script behind PHASE1. |
 | [vk-dispatch/](vk-dispatch/) | The chain test, the per-process ICD loading of a private driver build, and the run scripts of the dispatch experiment. |
-| [reports/](reports/) | `VULKAN_DISPATCH_EXPERIMENT.md`, `PHASE1_RUNTIME.md`, `PHASE2_GGML.md`, sanitised. |
+| [reports/](reports/) | `VULKAN_DISPATCH_EXPERIMENT.md`, `PHASE1_RUNTIME.md`, `PHASE2_GGML.md`, `PHASE3_MNN_FUSION.md`, sanitised. |
 | [results/](results/) | Raw logs the reports quote: firmware-profiler timelines, strace/perf summaries, chain-test output, llama-bench and CLIP runs. |
 
 Not included: models (`.onnx`, `.mnn`, `.param/.bin`, `.gguf`), test images,
