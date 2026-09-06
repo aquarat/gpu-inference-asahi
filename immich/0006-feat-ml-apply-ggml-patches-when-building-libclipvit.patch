@@ -1,0 +1,283 @@
+From f527c0afc80bac25230215fc86810d411d168296 Mon Sep 17 00:00:00 2001
+From: Aaron <blue@aquarat.co.uk>
+Date: Sun, 6 Sep 2026 15:46:53 +0100
+Subject: [PATCH] feat(ml): apply ggml patches when building libclipvit
+
+Adds machine-learning/ggml/patches, whose *.patch files are applied to the
+ggml source tree before it is compiled, by patches/apply.cmake. CMakeLists
+invokes it on both source paths: directly before add_subdirectory() for
+CLIPVIT_GGML_DIR, and as the PATCH_COMMAND of the FetchContent fallback.
+Patch paths are relative to the ggml tree root, so one file is valid for a
+standalone ggml checkout and for llama.cpp's ggml subtree alike, and applying
+is idempotent, so a patch already carried by the tree is skipped rather than
+failing the build and a landed patch can simply be deleted.
+
+patch(1) is preferred over "git apply": when the ggml tree is a subdirectory
+of a larger repository, git resolves the patch paths against the repository
+root rather than the working directory and exits successfully having changed
+nothing. The result is re-checked after applying so any such silent no-op is
+a configure-time error instead of a quietly unpatched library.
+
+The first patch hoists the A-tile load out of the coopmat mul_mm inner loop,
+so each operand tile is fetched once per k step instead of cms_per_row times.
+On a Vulkan driver that does not eliminate redundant shared-memory loads this
+takes ViT-H-14-378 from 1519 to 1400 ms, and the CLIP image endpoint from
+1537 to 1448 ms, with byte-identical embeddings.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VXX3uBLex4GVki947Lm5qV
+---
+ machine-learning/Dockerfile                   |  2 +-
+ machine-learning/ggml/CMakeLists.txt          |  8 +++
+ machine-learning/ggml/build.sh                |  1 +
+ ...out-of-the-coopmat-mul_mm-inner-loop.patch | 72 +++++++++++++++++++
+ machine-learning/ggml/patches/README.md       | 26 +++++++
+ machine-learning/ggml/patches/apply.cmake     | 72 +++++++++++++++++++
+ 6 files changed, 180 insertions(+), 1 deletion(-)
+ create mode 100644 machine-learning/ggml/patches/0001-vulkan-hoist-the-A-tile-load-out-of-the-coopmat-mul_mm-inner-loop.patch
+ create mode 100644 machine-learning/ggml/patches/README.md
+ create mode 100644 machine-learning/ggml/patches/apply.cmake
+
+diff --git a/machine-learning/Dockerfile b/machine-learning/Dockerfile
+index 5ea18ee..1240ea2 100644
+--- a/machine-learning/Dockerfile
++++ b/machine-learning/Dockerfile
+@@ -24,7 +24,7 @@ FROM builder-cpu AS builder-ggml
+ ARG GGML_VERSION="master"
+ 
+ COPY ggml /opt/clipvit
+-RUN apt-get update && apt-get install -y --no-install-recommends cmake git glslc libvulkan-dev spirv-headers && \
++RUN apt-get update && apt-get install -y --no-install-recommends cmake git glslc libvulkan-dev patch spirv-headers && \
+     cd /opt/clipvit && \
+     CLIPVIT_GGML_TAG="${GGML_VERSION}" sh build.sh -DCLIPVIT_BUILD_CLI=OFF
+ 
+diff --git a/machine-learning/ggml/CMakeLists.txt b/machine-learning/ggml/CMakeLists.txt
+index e4921f4..c30cc98 100644
+--- a/machine-learning/ggml/CMakeLists.txt
++++ b/machine-learning/ggml/CMakeLists.txt
+@@ -29,7 +29,14 @@ set(GGML_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+ set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+ set(GGML_ALL_WARNINGS OFF CACHE BOOL "")
+ 
++# patches/*.patch are applied to the ggml tree before it is compiled; see patches/README.md.
++# Application is idempotent, so a patch already carried by the tree is skipped, not an error.
++set(CLIPVIT_PATCH_SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/patches/apply.cmake)
++
+ if(CLIPVIT_GGML_DIR)
++    execute_process(
++        COMMAND ${CMAKE_COMMAND} -DGGML_DIR=${CLIPVIT_GGML_DIR} -P ${CLIPVIT_PATCH_SCRIPT}
++        COMMAND_ECHO NONE COMMAND_ERROR_IS_FATAL ANY)
+     add_subdirectory(${CLIPVIT_GGML_DIR} ggml EXCLUDE_FROM_ALL)
+ else()
+     include(FetchContent)
+@@ -37,6 +44,7 @@ else()
+         GIT_REPOSITORY https://github.com/ggml-org/ggml.git
+         GIT_TAG ${CLIPVIT_GGML_TAG}
+         GIT_SHALLOW TRUE
++        PATCH_COMMAND ${CMAKE_COMMAND} -P ${CLIPVIT_PATCH_SCRIPT}
+         EXCLUDE_FROM_ALL)
+     FetchContent_MakeAvailable(ggml)
+ endif()
+diff --git a/machine-learning/ggml/build.sh b/machine-learning/ggml/build.sh
+index 58fe54c..c1fbadb 100755
+--- a/machine-learning/ggml/build.sh
++++ b/machine-learning/ggml/build.sh
+@@ -2,6 +2,7 @@
+ # Builds libclipvit.so (and clipvit-cli) with ggml + its Vulkan backend linked in statically.
+ # Requires cmake >= 3.24, a C++17 compiler, the Vulkan headers/loader, glslc and SPIRV-Headers.
+ # CLIPVIT_GGML_DIR may point at an existing ggml checkout (default: fetch ggml-org/ggml).
++# The patches in patches/ are applied to that tree first, idempotently; see patches/README.md.
+ set -e
+ cd "$(dirname "$0")"
+ cmake -B build -DCMAKE_BUILD_TYPE=Release \
+diff --git a/machine-learning/ggml/patches/0001-vulkan-hoist-the-A-tile-load-out-of-the-coopmat-mul_mm-inner-loop.patch b/machine-learning/ggml/patches/0001-vulkan-hoist-the-A-tile-load-out-of-the-coopmat-mul_mm-inner-loop.patch
+new file mode 100644
+index 0000000..0d6d686
+--- /dev/null
++++ b/machine-learning/ggml/patches/0001-vulkan-hoist-the-A-tile-load-out-of-the-coopmat-mul_mm-inner-loop.patch
+@@ -0,0 +1,72 @@
++From 11edbbafb184854c10f5c59e575ca9e725fa1c35 Mon Sep 17 00:00:00 2001
++From: Aaron <blue@aquarat.co.uk>
++Date: Sun, 6 Sep 2026 15:21:39 +0100
++Subject: [PATCH 1/2] vulkan: hoist the A tile load out of the coopmat mul_mm
++ inner loop
++
++The coopmat1 inner loop of mul_mm reloads a cooperative matrix on every
++iteration of the loop nested inside it: with the loads ordered
++(cm_row -> load A, cm_col -> load B, multiply) the B tile is fetched
++cms_per_row times per k step instead of once. On drivers whose backend
++does not eliminate redundant shared-memory loads that is a real cost -
++for the 128x128x32 warptile it is 16 tile loads per k step where 8 would
++do.
++
++Load all cms_per_row A tiles into a register array once per k step and
++iterate cm_col outside, so both operands are fetched exactly once. The
++register cost is cms_per_row A tiles, which is small next to the
++cms_per_row * cms_per_col accumulators already live.
++
++On an Apple M1 (G13G, 32-wide subgroups, 8x8x8 hardware tiles) with the
++Honeykrisp VK_KHR_cooperative_matrix implementation:
++
++  llama-bench pp512 Q8_0, Qwen2.5-0.5B   1002 -> 1134 t/s  (+13 %)
++  llama-bench pp512 F16                  1017 -> 1110 t/s  (+9 %)
++  ViT-H-14-378 CLIP, f16, fa=0           1505 -> 1375 ms   (1.09x)
++
++test-backend-ops -o MUL_MAT: 1106/1106, unchanged. Hoisting B instead of
++A is also a win but a smaller one (1104 t/s).
++
++Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
++---
++ src/ggml-vulkan/vulkan-shaders/mul_mm.comp | 14 ++++++++------
++ 1 file changed, 8 insertions(+), 6 deletions(-)
++
++diff --git a/src/ggml-vulkan/vulkan-shaders/mul_mm.comp b/src/ggml-vulkan/vulkan-shaders/mul_mm.comp
++index 63c4aae..6e4894c 100644
++--- a/src/ggml-vulkan/vulkan-shaders/mul_mm.comp
+++++ b/src/ggml-vulkan/vulkan-shaders/mul_mm.comp
++@@ -268,7 +268,7 @@ void main() {
++ #endif
++ 
++ #ifdef COOPMAT
++-    coopmat<FLOAT_TYPE, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> cache_a;
+++    coopmat<FLOAT_TYPE, gl_ScopeSubgroup, TM, TK, gl_MatrixUseA> cache_a[cms_per_row];
++     coopmat<FLOAT_TYPE, gl_ScopeSubgroup, TK, TN, gl_MatrixUseB> cache_b;
++     coopmat<ACC_TYPE, gl_ScopeSubgroup, TM, TN, gl_MatrixUseAccumulator> sums[cms_per_row * cms_per_col];
++ 
++@@ -309,14 +309,16 @@ void main() {
++ 
++ #ifdef COOPMAT
++         [[unroll]] for (uint i = 0; i < BK; i += TK) {
+++            // Load each A tile once per k step instead of once per (k, cm_col).
++             [[unroll]] for (uint cm_row = 0; cm_row < cms_per_row; cm_row++) {
++-                // Load from shared into cache
++-                coopMatLoad(cache_a, buf_a, a_shmem_index(warp_r * WM + cm_row * TM, i / 2), a_shmem_stride(), gl_CooperativeMatrixLayoutRowMajor);
+++                coopMatLoad(cache_a[cm_row], buf_a, a_shmem_index(warp_r * WM + cm_row * TM, i / 2), a_shmem_stride(), gl_CooperativeMatrixLayoutRowMajor);
+++            }
++ 
++-                [[unroll]] for (uint cm_col = 0; cm_col < cms_per_col; cm_col++) {
++-                    coopMatLoad(cache_b, buf_b, (warp_c * WN + cm_col * TN) * SHMEM_STRIDE + i / 2, SHMEM_STRIDE, gl_CooperativeMatrixLayoutColumnMajor);
+++            [[unroll]] for (uint cm_col = 0; cm_col < cms_per_col; cm_col++) {
+++                coopMatLoad(cache_b, buf_b, (warp_c * WN + cm_col * TN) * SHMEM_STRIDE + i / 2, SHMEM_STRIDE, gl_CooperativeMatrixLayoutColumnMajor);
++ 
++-                    sums[cm_col * cms_per_row + cm_row] = coopMatMulAdd(cache_a, cache_b, sums[cm_col * cms_per_row + cm_row]);
+++                [[unroll]] for (uint cm_row = 0; cm_row < cms_per_row; cm_row++) {
+++                    sums[cm_col * cms_per_row + cm_row] = coopMatMulAdd(cache_a[cm_row], cache_b, sums[cm_col * cms_per_row + cm_row]);
++                 }
++             }
++         }
++-- 
++2.55.0
++
+diff --git a/machine-learning/ggml/patches/README.md b/machine-learning/ggml/patches/README.md
+new file mode 100644
+index 0000000..9191497
+--- /dev/null
++++ b/machine-learning/ggml/patches/README.md
+@@ -0,0 +1,26 @@
++# ggml patches applied by the clipvit build
++
++Every `*.patch` here is applied to the ggml source tree before it is compiled, by
++`apply.cmake` (invoked from `../CMakeLists.txt` for both the `CLIPVIT_GGML_DIR` and
++the `FetchContent` path). Application is idempotent, so a patch that has landed
++upstream — or is already in the tree being built — is skipped with a message rather
++than failing the build. Drop a patch file from this directory once its change is in
++the pinned `CLIPVIT_GGML_TAG`.
++
++Patch paths are relative to the root of the ggml tree (`src/...`), which makes them
++valid for a standalone `ggml-org/ggml` checkout and for llama.cpp's `ggml/` subtree
++alike.
++
++## 0001 — hoist the A tile load out of the coopmat `mul_mm` inner loop
++
++ggml's coopmat1 `mul_mm` reloads a cooperative matrix inside the loop nested within
++it, so one operand is fetched `cms_per_row` times per k step instead of once (16 tile
++loads per k step where 8 suffice, for the 128x128x32 warptile). Drivers that
++eliminate redundant shared-memory loads make this free; those that do not pay for it.
++The patch loads the `cms_per_row` A tiles into a register array once per k step and
++moves the `cm_col` loop outside, so both operands are fetched exactly once.
++
++Measured on an Apple M1 GPU (32-wide subgroups, 8x8x8 hardware tiles) with a
++`VK_KHR_cooperative_matrix` implementation that does not CSE shared loads:
++ViT-H-14-378 CLIP 1505 -> 1375 ms, `llama-bench` pp512 Q8_0 1002 -> 1134 t/s.
++`test-backend-ops -o MUL_MAT` 1106/1106, embeddings unchanged.
+diff --git a/machine-learning/ggml/patches/apply.cmake b/machine-learning/ggml/patches/apply.cmake
+new file mode 100644
+index 0000000..9912874
+--- /dev/null
++++ b/machine-learning/ggml/patches/apply.cmake
+@@ -0,0 +1,72 @@
++# Applies the *.patch files next to this script to a ggml source tree.
++#
++#   cmake -DGGML_DIR=/path/to/ggml -P patches/apply.cmake
++#
++# Paths in the patches are relative to the root of the ggml tree (src/...), so the same
++# patch applies to a standalone ggml checkout and to llama.cpp's ggml/ subtree alike.
++# Applying is idempotent: a patch that is already present (because the tree carries it,
++# or because a previous build applied it) is reported and skipped, so re-running a build
++# never fails and never applies a patch twice.
++#
++# patch(1) is preferred over "git apply": when the ggml tree is a subdirectory of a larger
++# repository (llama.cpp), git resolves the patch paths against the repository root instead
++# of the working directory, and silently reports success having changed nothing. Whichever
++# tool is used, the result is re-checked afterwards so a no-op apply is a hard error rather
++# than a library quietly built without the patch.
++cmake_minimum_required(VERSION 3.24)
++
++if(NOT DEFINED GGML_DIR)
++    set(GGML_DIR "${CMAKE_CURRENT_SOURCE_DIR}")  # script mode: the working directory
++endif()
++get_filename_component(GGML_DIR "${GGML_DIR}" ABSOLUTE)
++
++file(GLOB CLIPVIT_PATCHES "${CMAKE_CURRENT_LIST_DIR}/*.patch")
++list(SORT CLIPVIT_PATCHES)
++if(NOT CLIPVIT_PATCHES)
++    return()
++endif()
++
++find_program(CLIPVIT_PATCH patch)
++find_program(CLIPVIT_GIT git)
++if(CLIPVIT_PATCH)
++    set(CHECK ${CLIPVIT_PATCH} -p1 --forward --dry-run --silent -i)
++    set(APPLY ${CLIPVIT_PATCH} -p1 --forward --silent -i)
++elseif(CLIPVIT_GIT)
++    set(CHECK ${CLIPVIT_GIT} apply --check -p1 --)
++    set(APPLY ${CLIPVIT_GIT} apply -p1 --)
++else()
++    message(FATAL_ERROR "clipvit: neither patch nor git found; cannot apply ${CLIPVIT_PATCHES}")
++endif()
++
++function(clipvit_can_apply patch out)
++    execute_process(COMMAND ${CHECK} "${patch}"
++        WORKING_DIRECTORY "${GGML_DIR}" RESULT_VARIABLE rc
++        OUTPUT_QUIET ERROR_QUIET)
++    if(rc EQUAL 0)
++        set(${out} TRUE PARENT_SCOPE)
++    else()
++        set(${out} FALSE PARENT_SCOPE)
++    endif()
++endfunction()
++
++foreach(patch IN LISTS CLIPVIT_PATCHES)
++    get_filename_component(name "${patch}" NAME)
++    clipvit_can_apply("${patch}" needed)
++    if(NOT needed)
++        message(STATUS "clipvit: ${name} already present, skipping")
++        continue()
++    endif()
++    execute_process(COMMAND ${APPLY} "${patch}"
++        WORKING_DIRECTORY "${GGML_DIR}" RESULT_VARIABLE rc
++        OUTPUT_VARIABLE out ERROR_VARIABLE out)
++    if(NOT rc EQUAL 0)
++        message(FATAL_ERROR "clipvit: failed to apply ${name} to ${GGML_DIR}:\n${out}")
++    endif()
++    clipvit_can_apply("${patch}" still_applies)
++    if(still_applies)
++        message(FATAL_ERROR
++            "clipvit: applying ${name} to ${GGML_DIR} changed nothing. "
++            "The patch tool resolved its paths somewhere other than the ggml tree root.")
++    endif()
++    message(STATUS "clipvit: applied ${name}")
++endforeach()
+-- 
+2.55.0
+

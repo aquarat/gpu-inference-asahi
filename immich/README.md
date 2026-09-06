@@ -1,15 +1,18 @@
 # Immich machine-learning: ggml-Vulkan CLIP session backend
 
-Five commits on top of immich-app/immich `main` @ 4c7b30c (2026-09-06), as `git am`-able patches:
+Six commits on top of immich-app/immich `main` @ 4c7b30c (2026-09-06), as `git am`-able patches:
 
 1. `libclipvit` — a C library (ggml + ggml-vulkan statically linked) that runs CLIP ViT image encoders from GGUF, with a converter from Immich's own ONNX files (f16 / q8_0).
 2. `GgmlSession` — a session backend selected only for CLIP *visual* models when `MACHINE_LEARNING_GGML=true`; text tower, faces and OCR stay on ONNX Runtime. Knobs: `MACHINE_LEARNING_GGML_PRECISION` (fp16 shader math, or fp32 for exact results), `_WEIGHT_TYPE` (f16/q8_0), `_FLASH_ATTN`, `_THREADS`, `DEVICE_ID`.
 3. Docker `-ggml` image stages, `hwaccel.ml.yml` entry and docs.
 4. `MnnSession` — a CPU session backend on [MNN](https://github.com/alibaba/MNN) (pip `mnn`) for the facial recognition models (optionally the CLIP text tower), selected with `MACHINE_LEARNING_MNN=true`; the ONNX is converted on first load (subprocess) with a JSON sidecar carrying the ONNX input/output signature. fp32 arithmetic by default: MNN 3.6.1's fp16 path (`PrecisionMode.Low`, ARM82) returned wrong outputs for a varying subset of inputs of the ArcFace and CLIP text models (up to 90 % of text embeddings, 15-20 % of face rows, cosine down to 0), so `MACHINE_LEARNING_MNN_PRECISION=FP16` is opt-in and documented as "validate first".
 5. Docker `-mnn` image stages and docs.
+6. `machine-learning/ggml/patches/` — patches applied to the ggml source tree before `libclipvit` is compiled, by `patches/apply.cmake`, on both the `CLIPVIT_GGML_DIR` and the `FetchContent` path. Application is idempotent (a patch already in the tree is skipped), patch paths are relative to the ggml tree root so one file suits both a standalone ggml checkout and llama.cpp's `ggml/` subtree, and the result is re-checked after applying — `git apply` silently no-ops when the ggml tree is a subdirectory of a larger repository, so `patch(1)` is preferred. The first patch is the coopmat `mul_mm` A-tile hoist from the Phase 5 report.
 
 Measured on an Apple M1 (Honeykrisp, Mesa 26.1.8): ViT-H-14-378 image embedding 1.8–1.9 s vs 3.2 s on ORT CPU, cosine 0.9985–0.9994 (fp16 math) / 0.99999 (fp32), ~1.1–1.7 GB less resident memory. When the GPU is shared with a latency-sensitive client (an object detector with a 200 ms budget), run the service with `GGML_VK_MAX_NODES_PER_SUBMIT=1`: it costs ~1 % CLIP throughput and keeps the detector's p95 under 50 ms during embedding bursts; the default submission size pushed 88 % of detector requests past 200 ms.
 
 Not submitted upstream: Immich's CONTRIBUTING asks for a Discord discussion before large changes and declines LLM-generated PRs; see the deployment write-up in the companion `frigate-asahi`-style repository for the full evaluation.
+
+The ggml `mul_mm` hoist (patch 6, and `ggml/0001` in the Phase 5 report) is worth ~8 % on this GPU with no numerical change: standalone ViT-H-14-378 1519 -> 1400 ms, the deployed CLIP image endpoint 1537 -> 1448 ms and the combined clip+faces+ocr request 2241 -> 2071 ms, with byte-identical embeddings, unchanged resident memory and unchanged detector contention (p95 35 ms during a 5-image burst, 0 timeouts).
 
 MNN faces on the M1 (fp32, 4 threads): SCRFD 42 ms vs 99 ms on ORT, ArcFace glintr100 57 ms vs 96 ms per face, outputs identical (cosine 1.000000); an Immich face request with 6 faces 714 → ~400 ms, at about +1 GB of resident memory (MNN keeps more activation/weight copies than ORT; batching faces or mutable shapes cost another 0.5-1 GB, so the recogniser runs one face per call). The text tower stays on ORT (MNN fp32 is slower for it, 207 vs 157 ms).
