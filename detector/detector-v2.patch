@@ -1,0 +1,2273 @@
+diff -ruN old/detector/detector/backends.py new/detector/detector/backends.py
+--- old/detector/detector/backends.py	2026-09-06 13:44:30.134381906 +0100
++++ new/detector/detector/backends.py	2026-09-06 14:25:24.723645908 +0100
+@@ -52,6 +52,18 @@
+         raise NotImplementedError
+ 
+     @property
++    def batch_sizes(self) -> List[int]:
++        """Batch sizes this backend can run in one call, ascending (always contains 1)."""
++        return [1]
++
++    def infer_batch(self, feeds: Dict[str, np.ndarray], batch: int) -> List[np.ndarray]:
++        """Run one inference whose inputs carry `batch` images (batch must be in
++        batch_sizes). Outputs keep the batch dim. Default: batch 1 only."""
++        if batch != 1:
++            raise ValueError(f"{self.name} supports batch 1 only")
++        return self.infer(feeds)
++
++    @property
+     def loaded(self) -> bool:
+         return False
+ 
+@@ -480,6 +492,13 @@
+         return self.active.infer(feeds)
+ 
+     @property
++    def batch_sizes(self) -> List[int]:
++        return self.active.batch_sizes if self.active else [1]
++
++    def infer_batch(self, feeds, batch):
++        return self.active.infer_batch(feeds, batch)
++
++    @property
+     def loaded(self) -> bool:
+         return self.active is not None and self.active.loaded
+ 
+@@ -539,7 +558,15 @@
+     MNN through detector/mnn_shim/libmnn_shim.so (ctypes), which links the
+     source-built libMNN.so with the Vulkan backend (see README-linux.md).
+     forward_type 7 = Vulkan, 0 = CPU; precision 2 = fp16 ("low"), 1 = fp32.
+-    One Interpreter/Session is created per load() and reused; batch 1 only.
++
++    Batching (2026-09-06): load() builds one session per batch size in
++    `batch_sizes` (1 plus the powers of two up to DETECTOR_MAX_BATCH). Each
++    batch>1 session comes from its own fixed-batch .mnn (converted from the
++    <name>.b<N>.onnx variant that onnx_batch.py derives from the ONNX), because
++    MNN's Vulkan backend mis-computes a session that was *resized* to batch>1.
++    The batch-1 session uses the untouched <name>.mnn as before. If the
++    variants cannot be built (no `onnx` package, conversion error) the backend
++    silently stays batch-1 only; the service then serialises.
+     """
+ 
+     name = "mnn-vulkan"
+@@ -556,6 +583,8 @@
+         self._in_shapes: List[list] = []
+         self._out_names: List[str] = []
+         self._out_shapes: List[list] = []
++        self._batch_sizes: List[int] = [1]
++        self._out_shapes_by_batch: Dict[int, List[list]] = {}
+         self._closed = False
+         if forward_type == 0:
+             self.name = "mnn-cpu"
+@@ -569,6 +598,14 @@
+         c = ctypes
+         lib.mnn_shim_create.restype = c.c_void_p
+         lib.mnn_shim_create.argtypes = [c.c_char_p, c.c_int, c.c_int, c.c_int, c.c_char_p, c.c_int]
++        lib.mnn_shim_create_multi.restype = c.c_void_p
++        lib.mnn_shim_create_multi.argtypes = [c.POINTER(c.c_char_p), c.POINTER(c.c_int), c.c_int, c.c_int, c.c_int, c.c_int, c.c_char_p, c.c_int]
++        lib.mnn_shim_batches.restype = c.c_int
++        lib.mnn_shim_batches.argtypes = [c.c_void_p, c.POINTER(c.c_int), c.c_int]
++        lib.mnn_shim_io_info_batch.restype = c.c_int
++        lib.mnn_shim_io_info_batch.argtypes = [c.c_void_p, c.c_int, c.c_int, c.c_int, c.c_char_p, c.c_int, c.POINTER(c.c_int), c.c_int]
++        lib.mnn_shim_infer_batch.restype = c.c_int
++        lib.mnn_shim_infer_batch.argtypes = [c.c_void_p, c.c_int, c.POINTER(c.c_void_p), c.POINTER(c.c_size_t), c.POINTER(c.c_void_p), c.POINTER(c.c_size_t)]
+         lib.mnn_shim_num_inputs.restype = c.c_int
+         lib.mnn_shim_num_inputs.argtypes = [c.c_void_p]
+         lib.mnn_shim_num_outputs.restype = c.c_int
+@@ -581,7 +618,18 @@
+         lib.mnn_shim_destroy.argtypes = [c.c_void_p]
+         self._lib = lib
+         self._ct = c
+-        logger.info(f"[{self.name}] shim {shim}, forward_type={forward_type}, fp16={fp16}")
++        self.mnn_lib_path = self._resolve_mnn_lib()
++        logger.info(f"[{self.name}] shim {shim}, libMNN {self.mnn_lib_path}, forward_type={forward_type}, fp16={fp16}")
++
++    @staticmethod
++    def _resolve_mnn_lib() -> str:
++        """Which libMNN.so the process actually mapped (DETECTOR_MNN_LIB preload vs the shim's rpath)."""
++        try:
++            with open("/proc/self/maps") as f:
++                paths = {ln.split()[-1] for ln in f if ln.rstrip().endswith("/libMNN.so")}
++            return ", ".join(sorted(paths)) if paths else "?"
++        except OSError:
++            return "?"
+ 
+     @staticmethod
+     def cache_path(model_path: str) -> str:
+@@ -599,26 +647,57 @@
+             convert_onnx_to_mnn(model_path, mnn)
+         return mnn
+ 
+-    def _io(self, h, which: int, n: int):
++    def _io(self, h, which: int, n: int, batch: int = 1):
+         c = self._ct
+         names, shapes = [], []
+         for i in range(n):
+             name = c.create_string_buffer(512)
+             dims = (c.c_int * 8)()
+-            nd = self._lib.mnn_shim_io_info(h, which, i, name, 512, dims, 8)
++            nd = self._lib.mnn_shim_io_info_batch(h, batch, which, i, name, 512, dims, 8)
+             if nd < 0:
+                 raise RuntimeError("mnn_shim_io_info failed")
+             names.append(name.value.decode())
+             shapes.append([int(dims[k]) for k in range(nd)])
+         return names, shapes
+ 
++    @staticmethod
++    def wanted_batch_sizes() -> List[int]:
++        """1 plus the powers of two up to DETECTOR_MAX_BATCH (e.g. 8 -> [1, 2, 4, 8])."""
++        try:
++            mx = int(os.environ.get("DETECTOR_MAX_BATCH", "1"))
++        except ValueError:
++            mx = 1
++        sizes, b = [1], 2
++        while b <= mx:
++            sizes.append(b)
++            b *= 2
++        return sizes
++
++    def _batch_models(self, model_path: str) -> Tuple[List[str], List[int]]:
++        """(.mnn paths, batch sizes): the plain conversion for batch 1, a fixed-batch
++        variant per extra batch size (skipped with a warning if it cannot be built)."""
++        paths, sizes = [self._ensure_converted(model_path)], [1]
++        for b in self.wanted_batch_sizes()[1:]:
++            try:
++                from onnx_batch import ensure_batch_variant
++
++                variant = ensure_batch_variant(model_path, b)
++                paths.append(self._ensure_converted(variant))
++                sizes.append(b)
++            except Exception as e:  # noqa: BLE001
++                logger.warning(f"[{self.name}] no batch-{b} session: {e}")
++                break
++        return paths, sizes
++
+     def load(self, model_path: str) -> None:
+         c = self._ct
+         ins, outs = _onnx_io_meta(model_path)
+-        mnn = self._ensure_converted(model_path)
++        paths, sizes = self._batch_models(model_path)
+         err = c.create_string_buffer(1024)
+-        h = self._lib.mnn_shim_create(mnn.encode(), self.forward_type, 2 if self.fp16 else 1,
+-                                      int(self.threads or 4) if self.forward_type == 0 else 1, err, 1024)
++        c_paths = (c.c_char_p * len(paths))(*[p.encode() for p in paths])
++        c_sizes = (c.c_int * len(sizes))(*sizes)
++        h = self._lib.mnn_shim_create_multi(c_paths, c_sizes, len(paths), self.forward_type, 2 if self.fp16 else 1,
++                                            int(self.threads or 4) if self.forward_type == 0 else 1, err, 1024)
+         if not h:
+             raise RuntimeError(f"MNN create failed: {err.value.decode(errors='replace')}")
+         in_names, in_shapes = self._io(h, 0, self._lib.mnn_shim_num_inputs(h))
+@@ -631,30 +710,49 @@
+         order = [out_names.index(n) for n in onnx_out]
+         out_names = [out_names[i] for i in order]
+         out_shapes = [out_shapes[i] for i in order]
++        shapes_by_batch = {}
++        for b in sizes:
++            _, sh = self._io(h, 1, len(out_names), b)
++            shapes_by_batch[b] = [sh[i] for i in order]
+         old = self._h
+         self._h, self._in_names, self._in_shapes, self._out_names, self._out_shapes = h, in_names, in_shapes, out_names, out_shapes
+         self._out_order = order
+-        logger.info(f"[{self.name}] loaded {os.path.basename(model_path)}: inputs {list(zip(in_names, in_shapes))} outputs {list(zip(out_names, out_shapes))}")
+-        y = self.infer({n: np.zeros(s, np.float32) for n, s in zip(in_names, in_shapes)})
+-        logger.info(f"[{self.name}] warm-up ok: outputs {[(a.shape, a.dtype.name) for a in y]}")
++        self._batch_sizes = sorted(sizes)
++        self._out_shapes_by_batch = shapes_by_batch
++        logger.info(f"[{self.name}] loaded {os.path.basename(model_path)}: inputs {list(zip(in_names, in_shapes))} outputs {list(zip(out_names, out_shapes))} batch sizes {self._batch_sizes}")
++        for b in self._batch_sizes:
++            feeds = {n: np.zeros([b] + list(s[1:]), np.float32) for n, s in zip(in_names, in_shapes)}
++            y = self.infer_batch(feeds, b)
++            logger.info(f"[{self.name}] warm-up batch {b} ok: outputs {[(a.shape, a.dtype.name) for a in y]}")
+         if old:
+             self._lib.mnn_shim_destroy(old)
+ 
+     def infer(self, feeds: Dict[str, np.ndarray]) -> List[np.ndarray]:
++        return self.infer_batch(feeds, 1)
++
++    @property
++    def batch_sizes(self) -> List[int]:
++        return list(self._batch_sizes)
++
++    def infer_batch(self, feeds: Dict[str, np.ndarray], batch: int) -> List[np.ndarray]:
+         c = self._ct
+         n_in, n_out = len(self._in_names), len(self._out_names)
++        # no copy when the caller already hands us contiguous float32 (the ZMQ frame)
+         in_arrs = [np.ascontiguousarray(np.asarray(feeds[n]), dtype=np.float32) for n in self._in_names]
++        out_shapes = self._out_shapes_by_batch.get(batch)
++        if out_shapes is None:
++            raise ValueError(f"no batch-{batch} session (have {self._batch_sizes})")
+         # shim wants outputs in its own (map) order; we return ONNX order
+         shim_out = [None] * n_out
+         for k, i in enumerate(self._out_order):
+-            shim_out[i] = np.empty(self._out_shapes[k], np.float32)
++            shim_out[i] = np.empty(out_shapes[k], np.float32)
+         in_ptrs = (c.c_void_p * n_in)(*[a.ctypes.data for a in in_arrs])
+         in_sz = (c.c_size_t * n_in)(*[a.size for a in in_arrs])
+         out_ptrs = (c.c_void_p * n_out)(*[a.ctypes.data for a in shim_out])
+         out_sz = (c.c_size_t * n_out)(*[a.size for a in shim_out])
+-        rc = self._lib.mnn_shim_infer(self._h, in_ptrs, in_sz, out_ptrs, out_sz)
++        rc = self._lib.mnn_shim_infer_batch(self._h, batch, in_ptrs, in_sz, out_ptrs, out_sz)
+         if rc != 0:
+-            raise RuntimeError(f"mnn_shim_infer failed rc={rc}")
++            raise RuntimeError(f"mnn_shim_infer_batch(batch={batch}) failed rc={rc}")
+         return [shim_out[i] for i in self._out_order]
+ 
+     @property
+diff -ruN old/detector/detector/onnx_batch.py new/detector/detector/onnx_batch.py
+--- old/detector/detector/onnx_batch.py	1970-01-01 01:00:00.000000000 +0100
++++ new/detector/detector/onnx_batch.py	2026-09-06 14:25:24.724261532 +0100
+@@ -0,0 +1,203 @@
++"""
++Make a fixed-batch-N variant of a batch-1 ONNX export.
++
++Ultralytics-style exports hard-code the batch dimension: the graph input is
++[1, 3, H, W] and every Reshape constant starts with 1. This rewrites those
++constants (dim 0 -> -1, other dims from shape inference) and pins the input /
++output batch dim to `batch`, so the graph is valid for exactly that batch.
++
++Why a fixed batch per file rather than one dynamic model: MNN's Vulkan image
++backend computes wrong results after resizeTensor/resizeSession to batch>1
++(measured 2026-09-06, README-linux.md), while a model converted with the batch
++dim already fixed is correct. The batch-1 model is never touched, so the
++batch-1 path stays bit-identical to the single-model service.
++
++The YOLO "DFL" head (Reshape -> Transpose -> Softmax(last axis) -> Transpose ->
++1x1 Conv with weights 0..15) is rewritten to Softmax(bin axis) -> Mul(0..15) ->
++ReduceSum: MNN flattens a last-axis softmax to [N*anchors*4, 16] rows and its
++Vulkan image backend cannot address more than 16384 rows (2 images already
++need 16800), whereas the middle-axis form stays small. Same maths, ~4 fewer
++dispatches. Axis-wise Softmax needs opset >= 13, so the variant is stamped
++opset 13 when the graph contains no op whose opset-13 signature differs
++(Squeeze/Unsqueeze/Split/ReduceSum with attribute axes); otherwise the DFL is
++left alone and the batch variant is only usable where MNN handles it.
++"""
++
++import logging
++import os
++
++import numpy as np
++
++logger = logging.getLogger(__name__)
++
++
++def batch_variant_path(onnx_path: str, batch: int) -> str:
++    stem, _ = os.path.splitext(onnx_path)
++    return f"{stem}.b{batch}.onnx"
++
++
++_OPSET13_CHANGED = {"Squeeze", "Unsqueeze", "Split", "ReduceSum", "Hardmax", "LogSoftmax", "Softmax"}
++
++
++def _attr(node, name, default=None):
++    from onnx import helper
++
++    for a in node.attribute:
++        if a.name == name:
++            return helper.get_attribute_value(a)
++    return default
++
++
++def rewrite_dfl(m) -> int:
++    """Replace Reshape->Transpose->Softmax->Transpose->Conv(1x1, [1,K,1,1], no bias)
++    with Softmax(axis)->Mul->ReduceSum on the un-transposed tensor. Returns the number
++    of rewrites. Requires opset 13 semantics for Softmax/ReduceSum (caller bumps it)."""
++    from onnx import helper, numpy_helper
++
++    g = m.graph
++    inits = {i.name: i for i in g.initializer}
++    by_out = {o: n for n in g.node for o in n.output}
++    consumers = {}
++    for n in g.node:
++        for i in n.input:
++            consumers.setdefault(i, []).append(n)
++    rewrites = []
++    for sm in [n for n in g.node if n.op_type == "Softmax"]:
++        t1 = by_out.get(sm.input[0])
++        if t1 is None or t1.op_type != "Transpose":
++            continue
++        rs = by_out.get(t1.input[0])
++        if rs is None or rs.op_type != "Reshape":
++            continue
++        nxt = consumers.get(sm.output[0], [])
++        if len(nxt) != 1 or nxt[0].op_type != "Transpose":
++            continue
++        t2 = nxt[0]
++        cvs = consumers.get(t2.output[0], [])
++        if len(cvs) != 1 or cvs[0].op_type != "Conv" or len(cvs[0].input) != 2 or cvs[0].input[1] not in inits:
++            continue
++        cv = cvs[0]
++        w = numpy_helper.to_array(inits[cv.input[1]])
++        if w.ndim != 4 or w.shape[0] != 1 or w.shape[2:] != (1, 1):
++            continue
++        perm1, perm2 = list(_attr(t1, "perm", [])), list(_attr(t2, "perm", []))
++        if len(perm1) != 4 or len(perm2) != 4:
++            continue
++        axis = _attr(sm, "axis", -1)
++        axis = axis + 4 if axis < 0 else axis
++        if axis != 3:
++            continue  # opset<13 Softmax is only axis-wise on the last axis
++        orig_axis = perm1[axis]  # the bin axis in the Reshape output
++        if perm1[perm2[1]] != orig_axis or w.shape[1] != 16 and False:
++            continue
++        remaining = [d for d in range(1, 4) if d != orig_axis]
++        if [perm1[perm2[2]], perm1[perm2[3]]] != remaining:
++            continue
++        rewrites.append((rs, t1, sm, t2, cv, w, orig_axis))
++
++    for rs, t1, sm, t2, cv, w, orig_axis in rewrites:
++        k = w.shape[1]
++        wshape = [1, 1, 1, 1]
++        wshape[orig_axis] = k
++        wname = f"{cv.name or cv.output[0]}_dfl_bins"
++        g.initializer.append(numpy_helper.from_array(w.reshape(wshape).astype(w.dtype), wname))
++        axes_name = f"{cv.name or cv.output[0]}_dfl_axes"
++        g.initializer.append(numpy_helper.from_array(np.array([orig_axis], np.int64), axes_name))
++        base = sm.name or sm.output[0]
++        new_nodes = [
++            helper.make_node("Softmax", [rs.output[0]], [base + "_dfl_sm"], name=base + "_dfl_softmax", axis=orig_axis),
++            helper.make_node("Mul", [base + "_dfl_sm", wname], [base + "_dfl_mul"], name=base + "_dfl_mul"),
++            helper.make_node("ReduceSum", [base + "_dfl_mul", axes_name], [cv.output[0]], name=base + "_dfl_sum", keepdims=0),
++        ]
++        idx = list(g.node).index(cv)
++        for n in (t1, sm, t2, cv):
++            g.node.remove(n)
++        idx = min(idx, len(g.node))
++        for j, n in enumerate(new_nodes):
++            g.node.insert(idx - 3 + j if idx >= 3 else j, n)
++    return len(rewrites)
++
++
++def make_batch_variant(onnx_path: str, batch: int, out_path: str) -> str:
++    """Write the batch-`batch` variant of onnx_path to out_path (atomically). Raises on failure."""
++    import onnx
++    from onnx import numpy_helper, shape_inference
++
++    m = onnx.load(onnx_path)
++    try:
++        inferred = shape_inference.infer_shapes(m)
++        vi = {
++            v.name: [d.dim_value for d in v.type.tensor_type.shape.dim]
++            for v in list(inferred.graph.value_info) + list(inferred.graph.output)
++        }
++    except Exception as e:  # noqa: BLE001
++        logger.warning(f"[onnx_batch] shape inference failed ({e}); using 0 = copy-from-input for batch dims")
++        vi = {}
++
++    inits = {i.name: i for i in m.graph.initializer}
++    consts = {n.output[0]: n for n in m.graph.node if n.op_type == "Constant"}
++    patched = 0
++    for n in m.graph.node:
++        if n.op_type != "Reshape" or len(n.input) < 2:
++            continue
++        s = n.input[1]
++        if s in inits:
++            v = numpy_helper.to_array(inits[s]).copy()
++        elif s in consts:
++            v = numpy_helper.to_array(consts[s].attribute[0].t).copy()
++        else:
++            continue  # data-dependent shape: leave it
++        if v.ndim != 1 or len(v) < 2 or v[0] != 1:
++            continue
++        out_shape = vi.get(n.output[0])
++        if out_shape and len(out_shape) == len(v) and all(d > 0 for d in out_shape[1:]):
++            new = np.array(out_shape, dtype=np.int64)
++            new[0] = -1
++        else:
++            new = v.astype(np.int64)
++            new[0] = 0  # ONNX Reshape: 0 = copy that dim from the input
++        # give every Reshape its own constant (the export shares them)
++        name = f"{n.name or n.output[0]}_batch{batch}_shape"
++        m.graph.initializer.append(numpy_helper.from_array(new, name))
++        n.input[1] = name
++        patched += 1
++
++    for t in list(m.graph.input) + list(m.graph.output):
++        dims = t.type.tensor_type.shape.dim
++        if len(dims) and (dims[0].dim_value == 1 or dims[0].dim_param):
++            dims[0].dim_value = batch
++    # stale intermediate shapes would confuse checkers/converters
++    del m.graph.value_info[:]
++
++    opset = max((o.version for o in m.opset_import if o.domain in ("", "ai.onnx")), default=0)
++    ops = {n.op_type for n in m.graph.node}
++    dfl = 0
++    if opset >= 13 or not (ops & (_OPSET13_CHANGED - {"Softmax"})):
++        if opset < 13:
++            for o in m.opset_import:
++                if o.domain in ("", "ai.onnx"):
++                    o.version = 13
++        dfl = rewrite_dfl(m)
++    else:
++        logger.warning(f"[onnx_batch] opset {opset} graph uses {sorted(ops & _OPSET13_CHANGED)}; DFL head left as is")
++    used = {i for n in m.graph.node for i in n.input}
++    for init in [i for i in m.graph.initializer if i.name not in used]:
++        m.graph.initializer.remove(init)
++    onnx.checker.check_model(m)
++    tmp = out_path + ".tmp"
++    onnx.save(m, tmp)
++    os.replace(tmp, out_path)
++    logger.info(f"[onnx_batch] wrote batch-{batch} variant {out_path} ({patched} Reshape shapes rewritten, {dfl} DFL head(s) rewritten)")
++    return out_path
++
++
++def ensure_batch_variant(onnx_path: str, batch: int) -> str:
++    """Path to the cached batch-`batch` variant next to the model, (re)built when stale."""
++    out = batch_variant_path(onnx_path, batch)
++    try:
++        fresh = os.path.getmtime(out) >= os.path.getmtime(onnx_path) and os.path.getsize(out) > 0
++    except OSError:
++        fresh = False
++    if not fresh:
++        make_batch_variant(onnx_path, batch, out)
++    return out
+diff -ruN old/detector/detector/zmq_onnx_client.py new/detector/detector/zmq_onnx_client.py
+--- old/detector/detector/zmq_onnx_client.py	2026-09-06 13:44:30.128935290 +0100
++++ new/detector/detector/zmq_onnx_client.py	2026-09-06 14:25:24.723232076 +0100
+@@ -1,16 +1,24 @@
+ #!/usr/bin/env python3
+ """
+-ZMQ TCP ONNX Runtime Client
++ZMQ detector service for Frigate's `zmq` detector plugin.
+ 
+-This client connects to the ZMQ TCP proxy, accepts tensor inputs,
+-runs inference via a pluggable backend (ONNX Runtime CPU / CoreML today,
+-see backends.py) and returns detection results.
+-
+-Protocol:
+-- Receives multipart messages: [header_json_bytes, tensor_bytes]
+-- Header contains shape and dtype information
+-- Runs ONNX inference on the tensor
+-- Returns results in the expected format: [20, 6] float32 array
++Accepts tensor inputs over ZMQ, runs inference via a pluggable backend
++(backends.py: ONNX Runtime CPU / CoreML / ncnn / MNN-Vulkan) and returns
++detection results.
++
++Protocol (unchanged, exactly what frigate/detectors/plugins/zmq_ipc.py speaks):
++- Request: multipart [header_json_bytes, tensor_bytes]; the header carries
++  shape / dtype / model_type. Handshakes: [{"model_request": true, ...}] and
++  [{"model_data": true, ...}, model_bytes].
++- Reply: [header_json_bytes, float32 bytes] of shape [20, 6].
++
++v2 (2026-09-06): the server socket is a ROUTER instead of a REP, so several
++clients (Frigate detector processes, one REQ socket each) can have a request
++in flight at the same time. Requests that are waiting while the GPU is busy
++are drained together and run as one batched inference when the backend
++supports it (`--max-batch`, `--batch-window-ms`); with --max-batch 1 the
++behaviour is the old strictly sequential one. Tensors are taken from the ZMQ
++frame without a copy; batch inputs go into pre-allocated buffers.
+ 
+ Note: Timeouts are normal when Frigate has no motion to detect.
+ The server will continue running and waiting for requests.
+@@ -20,7 +28,8 @@
+ import logging
+ import os
+ import time
+-from typing import List, Optional, Tuple
++from collections import Counter
++from typing import Dict, List, Optional, Tuple
+ 
+ import numpy as np
+ import zmq
+@@ -35,9 +44,22 @@
+ logger = logging.getLogger(__name__)
+ 
+ 
++class _Request:
++    """One inference request waiting in the batch queue."""
++
++    __slots__ = ("envelope", "header", "frame", "tensor", "t_arrival")
++
++    def __init__(self, envelope, header, frame, tensor, t_arrival):
++        self.envelope = envelope  # ROUTER routing frames (identity [+ empty delimiter])
++        self.header = header
++        self.frame = frame  # zmq.Frame keeping the tensor bytes alive
++        self.tensor = tensor  # np.ndarray view on the frame (no copy)
++        self.t_arrival = t_arrival
++
++
+ class ZmqOnnxClient:
+     """
+-    ZMQ TCP client that runs ONNX inference on received tensors.
++    ZMQ server that runs inference on received tensors.
+     """
+ 
+     def __init__(
+@@ -48,10 +70,10 @@
+         backend: str = "auto",
+         models_dir: Optional[str] = None,
+         threads: Optional[int] = None,
++        max_batch: int = 1,
++        batch_window_ms: float = 0.0,
+     ):
+         """
+-        Initialize the ZMQ ONNX client.
+-
+         Args:
+             endpoint: ZMQ endpoint to bind to (ipc:// or tcp://)
+             model_path: Path to ONNX model file or "AUTO" for automatic model management
+@@ -59,27 +81,33 @@
+             backend: Inference backend name from backends.py ("auto", "cpu", "coreml", ...)
+             models_dir: Directory where models live / get saved (default: ../models)
+             threads: Intra-op thread count for CPU inference (None = runtime default)
++            max_batch: Most requests coalesced into one inference (1 = sequential, as before)
++            batch_window_ms: After the first request arrives, wait up to this long for
++                more before running a partial batch (0 = only batch what is already queued)
+         """
+         self.endpoint = endpoint
+         self.model_path = model_path
+         self.current_model = None
++        self.current_model_mtime = None
+         self.model_ready = False
+         self.models_dir = models_dir or os.path.join(
+             os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models"
+         )
++        self.max_batch = max(1, int(max_batch))
++        self.batch_window_s = max(0.0, float(batch_window_ms)) / 1000.0
+ 
+         # Initialize ZMQ context and socket
+         self.context = None
+         self.socket = None
++        self.poller = None
+         self._initialize_zmq()
+ 
+         # Inference backend (the engine seam; see backends.py)
+         self.backend = create_backend(
+             backend, models_dir=self.models_dir, threads=threads, providers=providers
+         )
+-        self._stats_n = 0
+-        self._stats_sum_ms = 0.0
+-        self._stats_max_ms = 0.0
++        self._stats_reset()
++        self._batch_inputs: Dict[Tuple, np.ndarray] = {}  # (batch, shape, dtype) -> buffer
+         if self.model_path != "AUTO":
+             if self._load_model_file(self.model_path):
+                 self.current_model = os.path.basename(self.model_path)
+@@ -87,13 +115,17 @@
+ 
+         # Preallocate zero result for error cases
+         self.zero_result = np.zeros((20, 6), dtype=np.float32)
++        self.zero_result_bytes = self.zero_result.tobytes(order="C")
+ 
+-        logger.info(f"ZMQ ONNX client initialized with endpoint: {endpoint}")
++        logger.info(
++            f"ZMQ detector initialized with endpoint: {endpoint}, max_batch={self.max_batch}, "
++            f"batch_window={self.batch_window_s * 1000:.1f}ms"
++        )
+         if self.model_path != "AUTO":
+             logger.info(f"ONNX model loaded from: {self.model_path}")
+         else:
+             logger.info(
+-                "ZMQ ONNX client started in AUTO mode - waiting for model requests"
++                "ZMQ detector started in AUTO mode - waiting for model requests"
+             )
+ 
+     def _initialize_zmq(self):
+@@ -102,22 +134,8 @@
+             # Clean up any existing resources
+             self.cleanup()
+ 
+-            # Create new context
+             self.context = zmq.Context()
+-            logger.debug("ZMQ context created successfully")
+-
+-            # Create new socket
+-            self.socket = self.context.socket(zmq.REP)
+-            logger.debug("ZMQ REP socket created successfully")
+-
+-            # Set socket options
+-            self.socket.setsockopt(zmq.RCVTIMEO, 5000)  # 5 second receive timeout
+-            self.socket.setsockopt(zmq.SNDTIMEO, 5000)  # 5 second send timeout
+-            self.socket.setsockopt(
+-                zmq.LINGER, 0
+-            )  # Don't wait for unsent messages on close
+-            logger.debug("ZMQ socket options set successfully")
+-
++            self._create_socket()
+             logger.debug("ZMQ context and socket initialized successfully")
+ 
+         except Exception as e:
+@@ -125,23 +143,25 @@
+             self.cleanup()
+             raise
+ 
++    def _create_socket(self):
++        # ROUTER: every REQ client gets its own identity, so many can be in flight.
++        self.socket = self.context.socket(zmq.ROUTER)
++        self.socket.setsockopt(zmq.SNDTIMEO, 5000)
++        self.socket.setsockopt(zmq.LINGER, 0)  # Don't wait for unsent messages on close
++        # Replies to a client that has gone away are dropped silently (the
++        # default), which is what happens when Frigate resets its socket.
++        self.socket.setsockopt(zmq.ROUTER_MANDATORY, 0)
++        self.poller = zmq.Poller()
++        self.poller.register(self.socket, zmq.POLLIN)
++
+     def _reset_socket(self):
+         """Reset the socket when encountering state issues."""
+         try:
+             logger.info("Resetting ZMQ socket due to state issues")
+-
+-            # Close existing socket
+             if self.socket:
+                 self.socket.close()
+                 self.socket = None
+-
+-            # Create new socket
+-            self.socket = self.context.socket(zmq.REP)
+-            self.socket.setsockopt(zmq.RCVTIMEO, 5000)
+-            self.socket.setsockopt(zmq.SNDTIMEO, 5000)
+-            self.socket.setsockopt(zmq.LINGER, 0)
+-
+-            # Rebind to endpoint
++            self._create_socket()
+             self.socket.bind(self.endpoint)
+             logger.info("Socket reset and rebound successfully")
+ 
+@@ -149,60 +169,49 @@
+             logger.error(f"Failed to reset socket: {e}")
+             raise
+ 
+-    def _load_model_file(self, model_path: str) -> bool:
+-        """
+-        Load a model file into the inference backend.
++    # -- model management ------------------------------------------------------
+ 
+-        Args:
+-            model_path: Path to the ONNX model file
+-
+-        Returns:
+-            True if the backend loaded it, False otherwise
+-        """
++    def _load_model_file(self, model_path: str) -> bool:
++        """Load a model file into the inference backend."""
+         try:
+             self.backend.load(model_path)
++            self._batch_inputs.clear()
+             return True
+         except Exception as e:
+             logger.error(f"Failed to load model into {self.backend.describe()}: {e}")
+             return False
+ 
+     def _check_model_exists(self, model_name: str) -> bool:
+-        """
+-        Check if a model exists in the models directory.
+-
+-        Args:
+-            model_name: Name of the model file to check
+-
+-        Returns:
+-            True if model exists, False otherwise
+-        """
+         model_path = os.path.join(self.models_dir, model_name)
+         return os.path.exists(model_path)
+ 
+     def _load_model(self, model_name: str) -> bool:
+         """
+-        Load a model from the models directory into the backend.
+-
+-        Args:
+-            model_name: Name of the model file to load
+-
+-        Returns:
+-            True if model loaded successfully, False otherwise
++        Load a model from the models directory into the backend. A handshake for
++        the model that is already loaded (same file, same mtime) is answered
++        without reloading: with several Frigate detector processes every one
++        of them handshakes, and each reset after a timeout handshakes again.
+         """
+         try:
+             model_path = os.path.join(self.models_dir, model_name)
++            mtime = os.path.getmtime(model_path)
++            if (
++                self.model_ready
++                and self.backend.loaded
++                and self.current_model == model_name
++                and self.current_model_mtime == mtime
++            ):
++                logger.info(f"Model {model_name} already loaded; handshake answered without reload")
++                return True
+             logger.info(f"Loading model from: {model_path}")
+ 
+             if not self._load_model_file(model_path):
+                 return False
+ 
+             self.current_model = model_name
++            self.current_model_mtime = mtime
+             self.model_ready = True
+-
+-            # Small delay to ensure model is fully ready
+-            time.sleep(0.1)
+             logger.info("Model ready for inference")
+-
+             return True
+ 
+         except Exception as e:
+@@ -210,167 +219,253 @@
+             return False
+ 
+     def _save_model(self, model_name: str, model_data: bytes) -> bool:
+-        """
+-        Save model data to the models directory.
+-
+-        Args:
+-            model_name: Name of the model file to save
+-            model_data: Binary model data
+-
+-        Returns:
+-            True if model saved successfully, False otherwise
+-        """
+         try:
+-            # Ensure models directory exists
+             os.makedirs(self.models_dir, exist_ok=True)
+-
+             model_path = os.path.join(self.models_dir, model_name)
+             logger.info(f"Saving model to: {model_path}")
+-
+             with open(model_path, "wb") as f:
+                 f.write(model_data)
+-
+             logger.info(f"Model saved successfully: {model_name}")
+             return True
+-
+         except Exception as e:
+             logger.error(f"Failed to save model {model_name}: {e}")
+             return False
+ 
+-    def _decode_request(self, frames: List[bytes]) -> Tuple[np.ndarray, dict]:
+-        """
+-        Decode the incoming request frames.
++    def _handle_model_request(self, header: dict) -> List[bytes]:
++        model_name = header.get("model_name")
++        if not model_name:
++            logger.error("Model request missing model_name")
++            return self._build_error_response("Model request missing model_name")
+ 
+-        Args:
+-            frames: List of message frames
++        logger.info(f"Model availability request for: {model_name}")
+ 
+-        Returns:
+-            Tuple of (tensor, header_dict)
+-        """
+-        try:
+-            if len(frames) < 1:
+-                raise ValueError(f"Expected at least 1 frame, got {len(frames)}")
++        if self._check_model_exists(model_name):
++            if self._load_model(model_name):
++                response_header = {
++                    "model_available": True,
++                    "model_loaded": True,
++                    "model_name": model_name,
++                    "message": f"Model {model_name} loaded successfully",
++                }
++            else:
++                response_header = {
++                    "model_available": True,
++                    "model_loaded": False,
++                    "model_name": model_name,
++                    "message": f"Model {model_name} exists but failed to load",
++                }
++        else:
++            logger.info(f"Model {model_name} not found, requesting transfer")
++            response_header = {
++                "model_available": False,
++                "model_name": model_name,
++                "message": f"Model {model_name} not found, please send model data",
++            }
+ 
+-            # Parse header
+-            header_bytes = frames[0]
+-            header = json.loads(header_bytes.decode("utf-8"))
+-
+-            if "model_request" in header:
+-                return None, header
+-
+-            if "model_data" in header:
+-                if len(frames) < 2:
+-                    raise ValueError(
+-                        f"Model data request expected 2 frames, got {len(frames)}"
+-                    )
+-                return None, header
++        return [json.dumps(response_header).encode("utf-8")]
+ 
+-            if len(frames) < 2:
+-                raise ValueError(f"Tensor request expected 2 frames, got {len(frames)}")
++    def _handle_model_data(self, header: dict, model_data: bytes) -> List[bytes]:
++        model_name = header.get("model_name")
++        if not model_name:
++            logger.error("Model data missing model_name")
++            return self._build_error_response("Model data missing model_name")
+ 
+-            tensor_bytes = frames[1]
+-            shape = tuple(header.get("shape", []))
+-            dtype_str = header.get("dtype", "uint8")
++        logger.info(f"Received model data for: {model_name}")
+ 
+-            dtype = np.dtype(dtype_str)
+-            tensor = np.frombuffer(tensor_bytes, dtype=dtype).reshape(shape)
+-            return tensor, header
++        if self._save_model(model_name, model_data):
++            if self._load_model(model_name):
++                response_header = {
++                    "model_saved": True,
++                    "model_loaded": True,
++                    "model_name": model_name,
++                    "message": f"Model {model_name} saved and loaded successfully",
++                }
++            else:
++                response_header = {
++                    "model_saved": True,
++                    "model_loaded": False,
++                    "model_name": model_name,
++                    "message": f"Model {model_name} saved but failed to load",
++                }
++        else:
++            response_header = {
++                "model_saved": False,
++                "model_loaded": False,
++                "model_name": model_name,
++                "message": f"Failed to save model {model_name}",
++            }
+ 
+-        except Exception as e:
+-            logger.error(f"Failed to decode request: {e}")
+-            raise
++        return [json.dumps(response_header).encode("utf-8")]
+ 
+-    def _run_inference(self, tensor: np.ndarray, header: dict) -> np.ndarray:
+-        """
+-        Run inference on the input tensor via the backend.
++    def _build_error_response(self, error_msg: str) -> List[bytes]:
++        return [json.dumps({"error": error_msg}).encode("utf-8")]
+ 
+-        Args:
+-            tensor: Input tensor
+-            header: Request header containing metadata (e.g., shape, layout)
++    # -- inference -------------------------------------------------------------
+ 
+-        Returns:
+-            Detection results as numpy array
+-        """
+-        if not self.backend.loaded:
+-            logger.warning("No model loaded in backend, returning zero results")
+-            return self.zero_result
++    @staticmethod
++    def _decode_tensor(header: dict, frame) -> np.ndarray:
++        """View the tensor bytes of a ZMQ frame as an ndarray (no copy)."""
++        shape = tuple(header.get("shape", []))
++        dtype = np.dtype(header.get("dtype", "uint8"))
++        return np.frombuffer(frame.buffer, dtype=dtype).reshape(shape)
++
++    def _batch_key(self, header: dict) -> Tuple:
++        """Requests can only share a batch if they agree on these."""
++        return (
++            tuple(header.get("shape", [])),
++            header.get("dtype", "uint8"),
++            header.get("model_type"),
++            header.get("width"),
++            header.get("height"),
++        )
+ 
+-        try:
+-            # Prepare input for ONNX Runtime
+-            # Determine input spatial size (W, H) from header/shape/layout
+-            model_type = header.get("model_type")
+-            width, height = self._extract_input_hw(header)
++    def _pick_batch_size(self, n: int) -> int:
++        """Smallest batch size the backend has a session for that fits n."""
++        for b in self.backend.batch_sizes:
++            if b >= n:
++                return b
++        return self.backend.batch_sizes[-1]
++
++    def _batch_input(self, batch: int, shape: Tuple[int, ...], dtype: np.dtype) -> np.ndarray:
++        key = (batch, shape, dtype.name)
++        buf = self._batch_inputs.get(key)
++        if buf is None:
++            buf = np.zeros((batch,) + tuple(shape[1:]), dtype=np.float32)
++            self._batch_inputs[key] = buf
++        return buf
++
++    def _post_process(self, model_type, outputs: List[np.ndarray], width: int, height: int) -> np.ndarray:
++        if model_type in (None, "yolo-generic", "yologeneric"):
++            result = post_process_yolo(outputs, width, height)
++        elif model_type == "dfine":
++            result = post_process_dfine(outputs, width, height)
++        elif model_type == "rfdetr":
++            result = post_process_rfdetr(outputs)
++        else:
++            raise ValueError(f"Unsupported model_type: {model_type}")
++        if result.dtype != np.float32:
++            result = result.astype(np.float32)
++        return result
+ 
++    def _run_batch(self, reqs: List[_Request]) -> List[np.ndarray]:
++        """
++        Run inference for a group of requests with the same batch key. Returns one
++        [20, 6] result per request (in order). Falls back to the zero result for
++        the whole group on error.
++        """
++        n = len(reqs)
++        header = reqs[0].header
++        model_type = header.get("model_type")
++        width, height = self._extract_input_hw(header)
++        t_start = time.perf_counter()
++        try:
++            batch = self._pick_batch_size(n)
++            input_name = self.backend.input_names[0]
++            t_build0 = time.perf_counter()
++            if n == 1 and batch == 1:
++                x = reqs[0].tensor
++                if x.dtype != np.float32:
++                    x = x.astype(np.float32)
++                if x.ndim == 3:
++                    x = x[None]
++            else:
++                x = self._batch_input(batch, reqs[0].tensor.shape, reqs[0].tensor.dtype)
++                for i, r in enumerate(reqs):
++                    x[i] = r.tensor if r.tensor.ndim == 4 else r.tensor[None]
++                if n < batch:
++                    x[n:] = 0  # pad slots must not carry stale frames
+             if model_type == "dfine":
+-                # DFine model requires both images and orig_target_sizes inputs
+-                input_data = {
+-                    "images": tensor.astype(np.float32),
+-                    "orig_target_sizes": np.array([[height, width]], dtype=np.int64),
++                feeds = {
++                    "images": x,
++                    "orig_target_sizes": np.array([[height, width]] * batch, dtype=np.int64),
+                 }
+             else:
+-                # Other models use single input
+-                input_name = self.backend.input_names[0]
+-                input_data = {input_name: tensor}
+-
+-            # Run inference
+-            t_start = time.perf_counter()
+-
+-            outputs = self.backend.infer(input_data)
+-
+-            t_after_onnx = time.perf_counter()
+-
+-            if model_type in (None, "yolo-generic", "yologeneric"):
+-                result = post_process_yolo(outputs, width, height)
+-            elif model_type == "dfine":
+-                result = post_process_dfine(outputs, width, height)
+-            elif model_type == "rfdetr":
+-                result = post_process_rfdetr(outputs)
++                feeds = {input_name: x}
++
++            t_build1 = time.perf_counter()
++            self._prof["build"] += t_build1 - t_build0
++            if batch == 1 and n > 1:
++                # backend without batch support: sequential
++                outputs_per_req = []
++                for i in range(n):
++                    single = {k: (v[i : i + 1]) for k, v in feeds.items()}
++                    outputs_per_req.append(self.backend.infer(single))
+             else:
+-                raise ValueError(f"Unsupported model_type: {model_type}")
++                outs = self.backend.infer_batch(feeds, batch) if batch > 1 else self.backend.infer(feeds)
++                outputs_per_req = [[o[i : i + 1] for o in outs] for i in range(n)]
++            t_after_engine = time.perf_counter()
++            self._prof["engine"] += t_after_engine - t_build1
+ 
++            results = [self._post_process(model_type, outs_i, width, height) for outs_i in outputs_per_req]
+             t_after_post = time.perf_counter()
+-            onnx_ms = (t_after_onnx - t_start) * 1000.0
+-            post_ms = (t_after_post - t_after_onnx) * 1000.0
+-            total_ms = (t_after_post - t_start) * 1000.0
+-            if logger.isEnabledFor(logging.DEBUG):
+-                logger.debug(
+-                    f"Inference timing: onnx={onnx_ms:.2f}ms, post={post_ms:.2f}ms, total={total_ms:.2f}ms"
+-                )
+-            self._record_stats(total_ms)
+-
+-            # Ensure float32 dtype
+-            result = result.astype(np.float32)
+-
+-            return result
++            self._prof["post"] += t_after_post - t_after_engine
++            self._record_stats(reqs, batch, t_build1, t_after_engine, t_after_post)
++            return results
+ 
+         except Exception as e:
+-            logger.error(f"Inference failed: {e}")
+-            return self.zero_result
++            logger.error(f"Inference failed ({n} requests): {e}")
++            return [self.zero_result] * n
+ 
+-    def _record_stats(self, total_ms: float, every: int = 1000):
+-        """Log a rolling latency summary every `every` inferences (INFO level)."""
+-        self._stats_n += 1
+-        self._stats_sum_ms += total_ms
+-        self._stats_max_ms = max(self._stats_max_ms, total_ms)
++    # -- stats -------------------------------------------------------------------
++
++    def _stats_reset(self):
++        self._prof = Counter()  # stage -> seconds (per batch: recv/decode/build/engine/post/send)
++        self._stats_n = 0
++        self._stats_batches = 0
++        self._stats_engine_sum = 0.0
++        self._stats_engine_max = 0.0
++        self._stats_post_sum = 0.0
++        self._stats_wait_sum = 0.0
++        self._stats_wait_max = 0.0
++        self._stats_total_sum = 0.0
++        self._stats_total_max = 0.0
++        self._stats_hist = Counter()
++
++    _STATS_EVERY = int(os.environ.get("DETECTOR_STATS_EVERY", "1000"))
++
++    def _record_stats(self, reqs, batch, t_start, t_engine, t_post, every: Optional[int] = None):
++        """Log a rolling summary every `every` requests (INFO level; DETECTOR_STATS_EVERY)."""
++        every = every or self._STATS_EVERY
++        n = len(reqs)
++        engine_ms = (t_engine - t_start) * 1000.0
++        post_ms = (t_post - t_engine) * 1000.0
++        self._stats_n += n
++        self._stats_batches += 1
++        self._stats_engine_sum += engine_ms
++        self._stats_engine_max = max(self._stats_engine_max, engine_ms)
++        self._stats_post_sum += post_ms
++        self._stats_hist[n] += 1
++        for r in reqs:
++            wait_ms = (t_start - r.t_arrival) * 1000.0
++            total_ms = (t_post - r.t_arrival) * 1000.0
++            self._stats_wait_sum += wait_ms
++            self._stats_wait_max = max(self._stats_wait_max, wait_ms)
++            self._stats_total_sum += total_ms
++            self._stats_total_max = max(self._stats_total_max, total_ms)
++        if logger.isEnabledFor(logging.DEBUG):
++            logger.debug(
++                f"batch n={n} (session {batch}): engine={engine_ms:.2f}ms post={post_ms:.2f}ms "
++                f"wait={[round((t_start - r.t_arrival) * 1000, 2) for r in reqs]}"
++            )
+         if self._stats_n >= every:
++            b = self._stats_batches
++            hist = ", ".join(f"{k}:{v}" for k, v in sorted(self._stats_hist.items()))
++            prof = " ".join(f"{k}={v * 1000 / self._stats_n:.2f}" for k, v in sorted(self._prof.items()))
+             logger.info(
+                 f"Inference stats ({self.backend.describe()}, {self.current_model}): "
+-                f"n={self._stats_n} avg={self._stats_sum_ms / self._stats_n:.1f}ms "
+-                f"max={self._stats_max_ms:.1f}ms"
++                f"n={self._stats_n} batches={b} sizes[{hist}] "
++                f"engine/batch avg={self._stats_engine_sum / b:.1f}ms max={self._stats_engine_max:.1f}ms "
++                f"post/batch avg={self._stats_post_sum / b:.2f}ms "
++                f"per-request queue-wait avg={self._stats_wait_sum / self._stats_n:.1f}ms max={self._stats_wait_max:.1f}ms "
++                f"arrival->done avg={self._stats_total_sum / self._stats_n:.1f}ms max={self._stats_total_max:.1f}ms "
++                f"| per-request ms: {prof}"
+             )
+-            self._stats_n = 0
+-            self._stats_sum_ms = 0.0
+-            self._stats_max_ms = 0.0
++            self._stats_reset()
+ 
+     def _extract_input_hw(self, header: dict) -> Tuple[int, int]:
+         """
+         Extract (width, height) from the header and/or tensor shape, supporting
+         NHWC/NCHW as well as 3D/4D inputs. Falls back to 320x320 if unknown.
+-
+-        Preference order:
+-        1) Explicit header keys: width/height
+-        2) Use provided layout to interpret shape
+-        3) Heuristics on shape
+         """
+         try:
+             if "width" in header and "height" in header:
+@@ -417,212 +512,157 @@
+         return 320, 320
+ 
+     def _build_response(self, result: np.ndarray) -> List[bytes]:
+-        """
+-        Build the response message.
+-
+-        Args:
+-            result: Detection results
+-
+-        Returns:
+-            List of response frames
+-        """
+         try:
+-            # Build header
+             header = {
+                 "shape": list(result.shape),
+                 "dtype": str(result.dtype.name),
+                 "timestamp": time.time(),
+             }
+-            header_bytes = json.dumps(header).encode("utf-8")
+-
+-            # Convert result to bytes
+-            result_bytes = result.tobytes(order="C")
+-
+-            return [header_bytes, result_bytes]
+-
++            return [json.dumps(header).encode("utf-8"), result.tobytes(order="C")]
+         except Exception as e:
+             logger.error(f"Failed to build response: {e}")
+-            # Return zero result as fallback
+-            header = {
+-                "shape": [20, 6],
+-                "dtype": "float32",
+-                "error": "Failed to build response",
+-            }
+-            header_bytes = json.dumps(header).encode("utf-8")
+-            result_bytes = self.zero_result.tobytes(order="C")
+-            return [header_bytes, result_bytes]
+-
+-    def _handle_model_request(self, header: dict) -> List[bytes]:
+-        """
+-        Handle model availability request.
+-
+-        Args:
+-            header: Request header containing model information
+-
+-        Returns:
+-            Response message indicating model availability
+-        """
+-        model_name = header.get("model_name")
+-
+-        if not model_name:
+-            logger.error("Model request missing model_name")
+-            return self._build_error_response("Model request missing model_name")
+-
+-        logger.info(f"Model availability request for: {model_name}")
+-
+-        if self._check_model_exists(model_name):
+-            logger.info(f"Model {model_name} exists locally")
+-            # Try to load the model
+-            if self._load_model(model_name):
+-                response_header = {
+-                    "model_available": True,
+-                    "model_loaded": True,
+-                    "model_name": model_name,
+-                    "message": f"Model {model_name} loaded successfully",
+-                }
+-            else:
+-                response_header = {
+-                    "model_available": True,
+-                    "model_loaded": False,
+-                    "model_name": model_name,
+-                    "message": f"Model {model_name} exists but failed to load",
+-                }
+-        else:
+-            logger.info(f"Model {model_name} not found, requesting transfer")
+-            response_header = {
+-                "model_available": False,
+-                "model_name": model_name,
+-                "message": f"Model {model_name} not found, please send model data",
+-            }
+-
+-        return [json.dumps(response_header).encode("utf-8")]
+-
+-    def _handle_model_data(self, header: dict, model_data: bytes) -> List[bytes]:
+-        """
+-        Handle model data transfer.
+-
+-        Args:
+-            header: Request header containing model information
+-            model_data: Binary model data
+-
+-        Returns:
+-            Response message indicating save success/failure
+-        """
+-        model_name = header.get("model_name")
++            header = {"shape": [20, 6], "dtype": "float32", "error": "Failed to build response"}
++            return [json.dumps(header).encode("utf-8"), self.zero_result_bytes]
+ 
+-        if not model_name:
+-            logger.error("Model data missing model_name")
+-            return self._build_error_response("Model data missing model_name")
+-
+-        logger.info(f"Received model data for: {model_name}")
++    # -- server loop ---------------------------------------------------------------
+ 
+-        if self._save_model(model_name, model_data):
+-            # Try to load the model
+-            if self._load_model(model_name):
+-                response_header = {
+-                    "model_saved": True,
+-                    "model_loaded": True,
+-                    "model_name": model_name,
+-                    "message": f"Model {model_name} saved and loaded successfully",
+-                }
++    def _send(self, envelope: List, frames: List[bytes]):
++        try:
++            self.socket.send_multipart(list(envelope) + frames)
++        except zmq.ZMQError as e:
++            logger.warning(f"send failed: {e}")
++
++    def _send_error(self, envelope: List, error_msg: str):
++        header = {"shape": [20, 6], "dtype": "float32", "error": error_msg}
++        self._send(envelope, [json.dumps(header).encode("utf-8"), self.zero_result_bytes])
++
++    def _split_envelope(self, frames: List) -> Tuple[List, List]:
++        """ROUTER gives [identity, (empty), payload...]; REQ clients send the empty
++        delimiter, DEALER clients may not."""
++        if len(frames) >= 2 and len(frames[1]) == 0:
++            return frames[:2], frames[2:]
++        return frames[:1], frames[1:]
++
++    def _handle_control(self, envelope, header: dict, payload: List) -> None:
++        if "model_request" in header:
++            self._send(envelope, self._handle_model_request(header))
++        elif "model_data" in header:
++            if len(payload) < 2:
++                self._send(envelope, self._build_error_response("Model data request expected 2 frames"))
+             else:
+-                response_header = {
+-                    "model_saved": True,
+-                    "model_loaded": False,
+-                    "model_name": model_name,
+-                    "message": f"Model {model_name} saved but failed to load",
+-                }
+-        else:
+-            response_header = {
+-                "model_saved": False,
+-                "model_loaded": False,
+-                "model_name": model_name,
+-                "message": f"Failed to save model {model_name}",
+-            }
+-
+-        return [json.dumps(response_header).encode("utf-8")]
++                self._send(envelope, self._handle_model_data(header, bytes(payload[1].buffer)))
+ 
+-    def _build_error_response(self, error_msg: str) -> List[bytes]:
+-        """Build an error response message."""
+-        error_header = {"error": error_msg}
+-        return [json.dumps(error_header).encode("utf-8")]
++    def _flush(self, pending: List[_Request]) -> None:
++        """Run everything in `pending` (grouped by batch key, largest group first)."""
++        groups: Dict[Tuple, List[_Request]] = {}
++        for r in pending:
++            groups.setdefault(self._batch_key(r.header), []).append(r)
++        for key in sorted(groups, key=lambda k: -len(groups[k])):
++            reqs = groups[key]
++            while reqs:
++                chunk, reqs = reqs[: self.max_batch], reqs[self.max_batch :]
++                if self.model_ready and self.backend.loaded:
++                    results = self._run_batch(chunk)
++                else:
++                    if not self.model_ready:
++                        logger.debug("Model not ready, returning zero detections")
++                    results = [self.zero_result] * len(chunk)
++                t_s0 = time.perf_counter()
++                for r, res in zip(chunk, results):
++                    self._send(r.envelope, self._build_response(res))
++                self._prof["send"] += time.perf_counter() - t_s0
++        pending.clear()
+ 
+     def start_server(self):
+-        """
+-        Start the ZMQ server and listen for requests.
+-        """
++        """Start the ZMQ server and listen for requests."""
+         try:
+-            # Log the exact endpoint being used
+             logger.info(f"Attempting to bind to endpoint: {self.endpoint}")
+-
+-            # Bind socket to endpoint
+             self.socket.bind(self.endpoint)
+             logger.info(f"ZMQ server successfully bound to {self.endpoint}")
+-            logger.info(
+-                "Detector is ready to accept model requests and inference requests"
+-            )
++            logger.info("Detector is ready to accept model requests and inference requests")
+ 
++            pending: List[_Request] = []
++            last_idle_log = time.monotonic()
+             while True:
+                 try:
+-                    frames = self.socket.recv_multipart()
+-                    tensor, header = self._decode_request(frames)
+-
+-                    if "model_request" in header:
+-                        # Model availability check (1 frame) - only during initialization
+-                        response = self._handle_model_request(header)
+-                        self.socket.send_multipart(response)
+-                    elif "model_data" in header and len(frames) >= 2:
+-                        # Model data transfer (2 frames) - only during initialization
+-                        model_data = frames[1]
+-                        response = self._handle_model_data(header, model_data)
+-                        self.socket.send_multipart(response)
+-                    elif tensor is not None:
+-                        # Regular inference request (2 frames) - always handle this
+-                        if self.model_ready and self.backend.loaded:
+-                            result = self._run_inference(tensor, header)
+-                        else:
+-                            result = self.zero_result
+-                            if not self.model_ready:
+-                                logger.debug(
+-                                    "Model not ready, returning zero detections"
+-                                )
+-
+-                        response = self._build_response(result)
+-                        self.socket.send_multipart(response)
++                    if pending:
++                        # wait (at most) for the rest of the batch window
++                        remaining = self.batch_window_s - (time.perf_counter() - pending[0].t_arrival)
++                        timeout_ms = max(0, int(remaining * 1000)) if len(pending) < self.max_batch else 0
+                     else:
+-                        # Unknown request type - send zero detections instead of error
+-                        logger.warning("Unknown request type, sending zero detections")
+-                        result = self.zero_result
+-                        response = self._build_response(result)
+-                        self.socket.send_multipart(response)
++                        timeout_ms = 5000
++                    events = dict(self.poller.poll(timeout_ms))
++
++                    if self.socket in events:
++                        # drain everything that is already queued in the socket
++                        while len(pending) < self.max_batch:
++                            t_r0 = time.perf_counter()
++                            try:
++                                frames = self.socket.recv_multipart(flags=zmq.NOBLOCK, copy=False)
++                            except zmq.Again:
++                                break
++                            t_arrival = time.perf_counter()
++                            self._prof["recv"] += t_arrival - t_r0
++                            envelope, payload = self._split_envelope(frames)
++                            if not payload:
++                                logger.warning("Empty request, sending zero detections")
++                                self._send(envelope, self._build_response(self.zero_result))
++                                continue
++                            try:
++                                header = json.loads(bytes(payload[0].buffer).decode("utf-8"))
++                            except Exception as e:
++                                logger.error(f"Failed to decode request header: {e}")
++                                self._send_error(envelope, f"bad header: {e}")
++                                continue
++                            if "model_request" in header or "model_data" in header:
++                                # control messages: finish queued work first, then load
++                                self._flush(pending)
++                                self._handle_control(envelope, header, payload)
++                                continue
++                            if len(payload) < 2:
++                                logger.warning("Tensor request without tensor frame, sending zero detections")
++                                self._send(envelope, self._build_response(self.zero_result))
++                                continue
++                            try:
++                                tensor = self._decode_tensor(header, payload[1])
++                            except Exception as e:
++                                logger.error(f"Failed to decode request: {e}")
++                                self._send_error(envelope, str(e))
++                                continue
++                            pending.append(_Request(envelope, header, payload[1], tensor, t_arrival))
++                            self._prof["decode"] += time.perf_counter() - t_arrival
++
++                    if pending:
++                        window_over = (time.perf_counter() - pending[0].t_arrival) >= self.batch_window_s
++                        if len(pending) >= self.max_batch or window_over or self.backend.batch_sizes == [1]:
++                            self._flush(pending)
++                    elif time.monotonic() - last_idle_log >= 5.0:
++                        last_idle_log = time.monotonic()
++                        logger.debug("ZMQ heartbeat: no requests")
+ 
+                 except zmq.ZMQError as e:
+                     error_msg = str(e)
+-
+-                    # Handle specific ZMQ errors
+                     if "Resource temporarily unavailable" in error_msg:
+-                        logger.debug(
+-                            "ZMQ heartbeat: Unable to communicate with Frigate"
+-                        )
++                        logger.debug("ZMQ heartbeat: Unable to communicate with Frigate")
+                         continue
+-                    elif (
+-                        "Operation cannot be accomplished in current state" in error_msg
+-                    ):
++                    elif "Operation cannot be accomplished in current state" in error_msg:
+                         logger.info("Socket state issue, resetting socket...")
+                         try:
+                             self._reset_socket()
++                            pending.clear()
+                             continue
+                         except Exception as reset_error:
+                             logger.error(f"Failed to reset socket: {reset_error}")
+                             break
+                     else:
+-                        # Send error response for other ZMQ errors
+                         logger.error(f"ZMQ error: {e}")
+-                        self._send_error_response(str(e))
++                        pending.clear()
+ 
+                 except Exception as e:
+                     logger.error(f"Unexpected error: {e}")
+-                    self._send_error_response(str(e))
++                    for r in pending:
++                        self._send_error(r.envelope, str(e))
++                    pending.clear()
+ 
+         except (KeyboardInterrupt, SystemExit):
+             logger.info("Shutting down server...")
+@@ -631,18 +671,6 @@
+         finally:
+             self.cleanup()
+ 
+-    def _send_error_response(self, error_msg: str):
+-        """Send an error response to the client."""
+-        try:
+-            error_header = {"shape": [20, 6], "dtype": "float32", "error": error_msg}
+-            error_response = [
+-                json.dumps(error_header).encode("utf-8"),
+-                self.zero_result.tobytes(order="C"),
+-            ]
+-            self.socket.send_multipart(error_response)
+-        except Exception as send_error:
+-            logger.error(f"Failed to send error response: {send_error}")
+-
+     def cleanup(self):
+         """Clean up resources (socket, context, then the inference backend)."""
+         try:
+@@ -661,14 +689,15 @@
+ 
+ 
+ def main():
+-    """Main function to run the ZMQ ONNX client."""
++    """Main function to run the ZMQ detector."""
+     import argparse
+ 
+     env = os.environ.get
+     parser = argparse.ArgumentParser(
+-        description="ZMQ ONNX Runtime detector for Frigate. "
++        description="ZMQ detector for Frigate. "
+         "Defaults can also be set with DETECTOR_ENDPOINT, DETECTOR_MODEL, "
+-        "DETECTOR_BACKEND, DETECTOR_MODELS_DIR and DETECTOR_THREADS."
++        "DETECTOR_BACKEND, DETECTOR_MODELS_DIR, DETECTOR_THREADS, DETECTOR_MAX_BATCH "
++        "and DETECTOR_BATCH_WINDOW_MS."
+     )
+     parser.add_argument(
+         "--endpoint",
+@@ -700,6 +729,20 @@
+         "good value on an 8-core M1 to leave room for ffmpeg)",
+     )
+     parser.add_argument(
++        "--max-batch",
++        type=int,
++        default=int(env("DETECTOR_MAX_BATCH", "1")),
++        help="Coalesce up to this many queued requests into one inference when the "
++        "backend supports it (default 1 = sequential)",
++    )
++    parser.add_argument(
++        "--batch-window-ms",
++        type=float,
++        default=float(env("DETECTOR_BATCH_WINDOW_MS", "0")),
++        help="Wait up to this long after the first queued request for more before "
++        "running a partial batch (default 0: batch only what is already queued)",
++    )
++    parser.add_argument(
+         "--providers",
+         nargs="+",
+         default=None,
+@@ -724,7 +767,9 @@
+ 
+     signal.signal(signal.SIGTERM, _on_sigterm)
+ 
+-    # Create and start client
++    if args.max_batch > 1:
++        os.environ.setdefault("DETECTOR_MAX_BATCH", str(args.max_batch))  # backends read it at load()
++
+     client = ZmqOnnxClient(
+         endpoint=args.endpoint,
+         model_path=args.model,
+@@ -732,6 +777,8 @@
+         backend=args.backend,
+         models_dir=args.models_dir,
+         threads=args.threads,
++        max_batch=args.max_batch,
++        batch_window_ms=args.batch_window_ms,
+     )
+ 
+     try:
+diff -ruN old/detector/frigate-detector.service new/detector/frigate-detector.service
+--- old/detector/frigate-detector.service	2026-09-06 13:44:30.158065649 +0100
++++ new/detector/frigate-detector.service	2026-09-06 14:25:24.722658202 +0100
+@@ -1,11 +1,10 @@
+-# Host-side Frigate ZMQ object detector (ncnn on the GPU via Vulkan; --backend cpu = ONNX Runtime).
++# Host-side Frigate ZMQ object detector (MNN on the GPU via Vulkan, batch-recorded command buffer; ncnn-vulkan
++# is the second choice, --backend cpu = ONNX Runtime).
+ # Installed copy: /etc/systemd/system/frigate-detector.service
+-# Source copy:    /home/<user>/frigate/detector/frigate-detector.service
+-# EXAMPLE: replace /home/<user>/frigate with the checkout path and <user> with the account that owns
+-# it (systemd system units do not expand $HOME/$FRIGATE_HOME), then copy to /etc/systemd/system/.
++# Source copy:    ~/frigate/detector/frigate-detector.service
+ [Unit]
+ Description=Frigate ZMQ object detector (Vulkan GPU / ONNX Runtime CPU)
+-Documentation=file:///home/<user>/frigate/detector/README-linux.md
++Documentation=file://~/frigate/detector/README-linux.md
+ After=network-online.target
+ Wants=network-online.target
+ 
+@@ -13,17 +12,34 @@
+ Type=simple
+ User=<user>
+ Group=<user>
+-WorkingDirectory=/home/<user>/frigate/detector
++WorkingDirectory=~/frigate/detector
+ Environment=PYTHONUNBUFFERED=1
+ # Backend/endpoint/threads can also be set via DETECTOR_* env vars; CLI flags win.
+-# Backends: vulkan (alias -> ncnn-vulkan, GPU, auto-falls back to cpu if Vulkan fails), ncnn-vulkan,
+-#           mnn-vulkan, ncnn-cpu, cpu (ONNX Runtime). To revert to CPU: change --backend to cpu.
+-ExecStart=/home/<user>/frigate/detector/venv/bin/python /home/<user>/frigate/detector/detector/zmq_onnx_client.py \
++# Backends: vulkan (alias -> first of DETECTOR_VULKAN_PREFERENCE that initialises, auto-falls back to cpu
++#           if Vulkan fails), ncnn-vulkan, mnn-vulkan, ncnn-cpu, cpu (ONNX Runtime).
++# 2026-09-06: mnn-vulkan first, using the batch-mode libMNN.so (MNN bef71b9 + gpu-opt patch 330e565, built
++#           in mnn-batch/, see mnn-batch/PROVENANCE.txt): ~12 ms engine time vs ~35 ms for ncnn-vulkan.
++# 2026-09-06 (later): lib-v2 = the same + conv+SiLU fusion (patch d9f1652, mnn-batch/lib-v2/PROVENANCE.txt),
++#           ~11.2 ms engine; set DETECTOR_MNN_LIB back to mnn-batch/lib/libMNN.so to drop the fusion.
++# Rollback to the previous production setup: delete the two Environment= lines below (ncnn-vulkan first,
++#           stock research libMNN via the shim's rpath), then daemon-reload + restart. To revert to CPU:
++#           change --backend to cpu.
++Environment=DETECTOR_VULKAN_PREFERENCE=mnn-vulkan,ncnn-vulkan
++Environment=DETECTOR_MNN_LIB=~/frigate/detector/mnn-batch/lib-v2/libMNN.so
++# 2026-09-06 (v2 service): ROUTER socket, so Frigate's detector processes (config.yaml `detectors:` lists
++#           host_zmq + host_zmq_b on the same endpoint) can have requests in flight together; queued requests
++#           are coalesced into one GPU inference up to --max-batch (1 = sequential, exactly the old behaviour;
++#           batch>1 sessions come from mnn-batch fixed-batch model variants, see README-linux.md "Batching").
++#           --batch-window-ms 0: never wait for more requests, batch only what is already queued.
++#           Rollback of the v2 service alone: `--max-batch 1` (and the old REP code is in git history / README).
++ExecStart=~/frigate/detector/venv/bin/python ~/frigate/detector/detector/zmq_onnx_client.py \
+     --backend vulkan \
+     --threads 4 \
+     --endpoint tcp://0.0.0.0:5555 \
+-    --models-dir /home/<user>/frigate/detector/models \
+-    --model AUTO
++    --models-dir ~/frigate/detector/models \
++    --model AUTO \
++    --max-batch 1 \
++    --batch-window-ms 0
+ Restart=always
+ RestartSec=3
+ Nice=5
+@@ -35,7 +51,7 @@
+ PrivateTmp=true
+ ProtectSystem=full
+ ProtectHome=read-only
+-ReadWritePaths=/home/<user>/frigate/detector/models
++ReadWritePaths=~/frigate/detector/models
+ 
+ [Install]
+ WantedBy=multi-user.target
+diff -ruN old/detector/gen_frigate_detectors_config.py new/detector/gen_frigate_detectors_config.py
+--- old/detector/gen_frigate_detectors_config.py	1970-01-01 01:00:00.000000000 +0100
++++ new/detector/gen_frigate_detectors_config.py	2026-09-06 14:25:24.723056451 +0100
+@@ -0,0 +1,21 @@
++"""Write a copy of Frigate's config.yaml with N `zmq` detectors (host_zmq, host_zmq_b, host_zmq_c ...) on the same endpoint.
++usage: gen_config.py <in> <out> <N>"""
++import sys, re
++src, dst, n = sys.argv[1], sys.argv[2], int(sys.argv[3])
++text = open(src).read()
++m = re.search(r"(?m)^detectors:\n(?P<body>(?:[ \t]+.*\n|[ \t]*#.*\n)+)", text)
++assert m, "detectors: block not found"
++body = m.group("body")
++# keep the existing host_zmq entry (comments included), append the extra ones after it
++suffixes = "bcdefgh"
++extra = "".join(
++    f"  # 2026-09-06: extra detector process on the SAME host service. Frigate feeds all its\n"
++    f"  # detector processes from one shared queue, so with N of them N requests are in flight\n"
++    f"  # at once and the host service (ROUTER socket) overlaps them; see detector/README-linux.md.\n"
++    f"  host_zmq_{suffixes[i]}:\n    type: zmq\n    endpoint: tcp://host.docker.internal:5555\n"
++    for i in range(n - 1)
++)
++new_body = body.rstrip("\n") + "\n" + extra
++out = text[: m.start("body")] + new_body + text[m.end("body") :]
++open(dst, "w").write(out)
++print(f"wrote {dst} with {n} detectors")
+diff -ruN old/detector/loadgen.py new/detector/loadgen.py
+--- old/detector/loadgen.py	1970-01-01 01:00:00.000000000 +0100
++++ new/detector/loadgen.py	2026-09-06 14:25:24.722531577 +0100
+@@ -0,0 +1,179 @@
++#!/usr/bin/env python3
++"""
++Multi-client load generator for the ZMQ detector: N independent REQ clients
++(one thread + socket each, exactly like N Frigate detector processes), each
++pacing requests at --rate per second with real frames, reporting per-request
++round-trip latency. Speaks the same protocol as test_client.py / Frigate.
++
++  venv/bin/python loadgen.py --endpoint tcp://127.0.0.1:5556 --clients 4 --rate 5 --duration 60 --frames DIR
++
++--check REF.npz compares every reply with a per-frame reference (saved with
++--save-ref REF.npz from a known-good run) and counts mismatching rows.
++"""
++import argparse, glob, json, os, sys, threading, time
++import numpy as np, zmq
++
++ZERO = np.zeros((20, 6), np.float32)
++
++
++def load_frames(d, size):
++    import cv2
++    out = []
++    for f in sorted(glob.glob(os.path.join(d, "*.jpg")) + glob.glob(os.path.join(d, "*.png")) + glob.glob(os.path.join(d, "*.webp"))):
++        img = cv2.imread(f)
++        if img is None:
++            continue
++        img = cv2.resize(img, (size, size))
++        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
++        out.append((os.path.basename(f), np.ascontiguousarray(img.transpose(2, 0, 1)[None])))
++    return out
++
++
++def handshake(sock, model_name):
++    sock.send_multipart([json.dumps({"model_request": True, "model_name": model_name}).encode()])
++    orig = sock.getsockopt(zmq.RCVTIMEO); sock.setsockopt(zmq.RCVTIMEO, 30000)
++    try:
++        resp = json.loads(sock.recv_multipart()[0].decode())
++    finally:
++        sock.setsockopt(zmq.RCVTIMEO, orig)
++    if not (resp.get("model_available") and resp.get("model_loaded")):
++        raise RuntimeError(f"handshake failed: {resp}")
++
++
++def _same(ref, res, tol):
++    """Exact match with tol=0; otherwise same rows/classes, scores within tol, boxes within tol (normalised)."""
++    if tol <= 0:
++        return np.array_equal(ref, res)
++    a, b = ref[ref[:, 1] > 0], res[res[:, 1] > 0]
++    if a.shape != b.shape or not np.array_equal(a[:, 0], b[:, 0]):
++        return False
++    return np.abs(a[:, 1:] - b[:, 1:]).max(initial=0.0) <= tol
++
++
++class Client(threading.Thread):
++    def __init__(self, idx, args, frames, ctx, start_at, results):
++        super().__init__(daemon=True)
++        self.idx, self.args, self.frames, self.ctx, self.start_at, self.results = idx, args, frames, ctx, start_at, results
++        self.lat, self.timeouts, self.errors, self.mismatch = [], 0, 0, 0
++
++    def _sock(self):
++        s = self.ctx.socket(zmq.REQ)
++        s.setsockopt(zmq.RCVTIMEO, self.args.timeout_ms); s.setsockopt(zmq.SNDTIMEO, self.args.timeout_ms); s.setsockopt(zmq.LINGER, 0)
++        s.connect(self.args.endpoint)
++        return s
++
++    def run(self):
++        sock = self._sock()
++        handshake(sock, self.args.model_name)
++        n = len(self.frames)
++        # each client walks the frame set from a different offset (different cameras see different scenes)
++        k = (self.idx * 7) % n
++        i = -1
++        period = 1.0 / self.args.rate if self.args.rate else 0
++        # stagger clients by a fraction of the period so they do not all fire in lock-step
++        t0 = self.start_at + (self.idx * period / self.args.clients if self.args.stagger else 0)
++        while True:
++            i += 1
++            now = time.perf_counter()
++            if now - self.start_at >= self.args.duration:
++                break
++            if period:
++                due = t0 + i * period
++                w = due - time.perf_counter()
++                if w > 0:
++                    time.sleep(w)
++                elif self.args.rate and -w > 2 * period:
++                    # fell far behind (server stalled): resync instead of bursting
++                    t0 = time.perf_counter() - i * period
++            name, tensor = self.frames[k]; k = (k + 1) % n
++            header = json.dumps({"shape": list(tensor.shape), "dtype": "float32", "model_type": "yologeneric"}).encode()
++            t = time.perf_counter()
++            try:
++                sock.send_multipart([header, tensor.data])
++                frames = sock.recv_multipart()
++            except zmq.Again:
++                self.timeouts += 1
++                sock.close(linger=0); sock = self._sock()
++                try:
++                    handshake(sock, self.args.model_name)
++                except Exception:
++                    pass
++                continue
++            self.lat.append((time.perf_counter() - t) * 1000.0)
++            if len(frames) >= 2:
++                hdr = json.loads(frames[0].decode())
++                if "error" in hdr:
++                    self.errors += 1
++                    continue
++                res = np.frombuffer(frames[1], np.float32).reshape(tuple(hdr.get("shape", [20, 6])))
++            else:
++                res = np.frombuffer(frames[0], np.float32).reshape(20, 6)
++            if self.results is not None:
++                self.results.setdefault(name, res.copy())
++                if self.args.check is not None:
++                    ref = self.args.check.get(name)
++                    if ref is not None and not _same(ref, res, self.args.tol):
++                        self.mismatch += 1
++                        if self.mismatch <= 3:
++                            print(f"[client {self.idx}] MISMATCH {name}: max |diff| {np.abs(ref - res).max():.4g}", flush=True)
++
++
++def main():
++    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
++    p.add_argument("--endpoint", default="tcp://127.0.0.1:5556")
++    p.add_argument("--model-name", default="fox-person-cat-320.onnx")
++    p.add_argument("--clients", type=int, default=4)
++    p.add_argument("--rate", type=float, default=5.0, help="requests per second per client (0 = as fast as possible)")
++    p.add_argument("--duration", type=float, default=30.0)
++    p.add_argument("--frames", required=True, help="directory of jpg/png/webp frames")
++    p.add_argument("--size", type=int, default=320)
++    p.add_argument("--timeout-ms", type=int, default=200)
++    p.add_argument("--stagger", action="store_true", help="offset client phases (default: all fire together, worst case for the server)")
++    p.add_argument("--save-ref", help="save the per-frame results as a reference .npz")
++    p.add_argument("--check", help="reference .npz to compare every reply against")
++    p.add_argument("--tol", type=float, default=0.0, help="tolerance for --check (0 = bit-exact)")
++    p.add_argument("--report-every", type=float, default=0)
++    p.add_argument("--json", help="append a JSON summary line to this file")
++    p.add_argument("--tag", default="")
++    args = p.parse_args()
++    frames = load_frames(args.frames, args.size)
++    if not frames:
++        sys.exit("no frames")
++    if args.check:
++        z = np.load(args.check); args.check = {k: z[k] for k in z.files}
++    results = {} if (args.save_ref or args.check) else None
++    ctx = zmq.Context()
++    start_at = time.perf_counter() + 0.5
++    clients = [Client(i, args, frames, ctx, start_at, results) for i in range(args.clients)]
++    for c in clients:
++        c.start()
++    t_end = start_at + args.duration
++    t_report = start_at
++    while any(c.is_alive() for c in clients):
++        time.sleep(min(args.report_every or 1.0, 1.0))
++        if args.report_every and time.perf_counter() < t_end and time.perf_counter() - t_report >= args.report_every:
++            t_report = time.perf_counter()
++            a = np.array([x for c in clients for x in c.lat[-100:]] or [0.0])
++            print(f"[{time.perf_counter() - start_at:5.0f}s] n={sum(len(c.lat) for c in clients)} timeouts={sum(c.timeouts for c in clients)} "
++                  f"recent avg={a.mean():.2f} p95={np.percentile(a, 95):.2f} max={a.max():.2f} ms", flush=True)
++    for c in clients:
++        c.join()
++    lat = np.array([x for c in clients for x in c.lat] or [float("nan")])
++    timeouts, errors, mism = sum(c.timeouts for c in clients), sum(c.errors for c in clients), sum(c.mismatch for c in clients)
++    n_ok = sum(len(c.lat) for c in clients)
++    summ = dict(tag=args.tag, clients=args.clients, rate=args.rate, n=n_ok, req_s=n_ok / args.duration,
++                timeouts=timeouts, errors=errors, mismatches=mism,
++                avg=float(lat.mean()), p50=float(np.percentile(lat, 50)), p95=float(np.percentile(lat, 95)),
++                p99=float(np.percentile(lat, 99)), max=float(lat.max()))
++    print(f"{args.tag} clients={args.clients} rate={args.rate}/s each: {n_ok} ok ({summ['req_s']:.1f} req/s), {timeouts} timeouts, {errors} errors, {mism} mismatches | "
++          f"latency avg={summ['avg']:.2f} p50={summ['p50']:.2f} p95={summ['p95']:.2f} p99={summ['p99']:.2f} max={summ['max']:.2f} ms")
++    if args.json:
++        with open(args.json, "a") as f:
++            f.write(json.dumps(summ) + "\n")
++    if args.save_ref and results:
++        np.savez(args.save_ref, **results); print(f"saved reference for {len(results)} frames to {args.save_ref}")
++    sys.exit(1 if (timeouts or errors or mism) else 0)
++
++
++if __name__ == "__main__":
++    main()
+diff -ruN old/detector/Makefile new/detector/Makefile
+--- old/detector/Makefile	2026-09-06 13:44:30.148405462 +0100
++++ new/detector/Makefile	2026-09-06 14:25:24.722448786 +0100
+@@ -36,10 +36,17 @@
+ 
+  
+ # --- Linux / Vulkan extras (see README-linux.md) ---------------------------------
+-MNN_SRC ?= $(HOME)/frigate/research/MNN-src
++# 2026-09-06: the shim is built against the self-contained batch-mode tree in mnn-batch/
++# (headers from mnn-batch/src, libMNN.so from mnn-batch/lib; DETECTOR_MNN_LIB can still
++# override the library at run time). MNN_SRC=~/frigate/research/MNN-src
++# MNN_LIBDIR=$(MNN_SRC)/build rebuilds it against the research tree as before.
++MNN_SRC ?= ~/frigate/detector/mnn-batch/src
++MNN_LIBDIR ?= ~/frigate/detector/mnn-batch/lib
+ 
+ .PHONY: mnn-shim
+-# Build the ctypes shim for the mnn-vulkan backend against the source-built libMNN.so
++# Build the ctypes shim for the mnn-vulkan backend against the source-built libMNN.so.
++# Written to a temp name and renamed so a running service keeps its mapped copy.
+ mnn-shim:
+-	g++ -O2 -std=c++17 -shared -fPIC mnn_shim/mnn_shim.cpp -o mnn_shim/libmnn_shim.so \
+-	    -I$(MNN_SRC)/include -L$(MNN_SRC)/build -lMNN -Wl,-rpath,$(MNN_SRC)/build
++	g++ -O2 -std=c++17 -shared -fPIC mnn_shim/mnn_shim.cpp -o mnn_shim/libmnn_shim.so.tmp \
++	    -I$(MNN_SRC)/include -L$(MNN_LIBDIR) -lMNN -Wl,-rpath,$(MNN_LIBDIR)
++	mv -f mnn_shim/libmnn_shim.so.tmp mnn_shim/libmnn_shim.so
+diff -ruN old/detector/mnn_shim/mnn_shim.cpp new/detector/mnn_shim/mnn_shim.cpp
+--- old/detector/mnn_shim/mnn_shim.cpp	2026-09-06 13:44:30.143579576 +0100
++++ new/detector/mnn_shim/mnn_shim.cpp	2026-09-06 14:25:24.723096243 +0100
+@@ -1,93 +1,217 @@
+ // Tiny C ABI around MNN::Interpreter so backends.py can drive the source-built
+-// libMNN.so (Vulkan) through ctypes. Single-session, batch-1, float32 I/O.
++// libMNN.so (Vulkan) through ctypes. Float32 I/O.
++//
++// v2 (2026-09-06): batched inference. A handle holds one Session per batch
++// size; mnn_shim_infer_batch(h, b, ...) runs the session for b. Two ways to
++// build them:
++//   mnn_shim_create_multi():   one .mnn file per batch size (each converted
++//                              with that fixed batch dim). This is what the
++//                              detector uses: MNN's Vulkan image backend gets
++//                              batch>1 wrong after resizeTensor/resizeSession
++//                              (measured 2026-09-06), but a model whose batch
++//                              dim is fixed at conversion time is right.
++//   mnn_shim_create_batched(): one .mnn resized to each batch (CPU backend ok;
++//                              Vulkan: wrong for batch>1, kept for experiments).
++// Host-side tensors wrap the caller's buffers (no memcpy). The v1 entry points
++// (mnn_shim_create / mnn_shim_infer / mnn_shim_io_info, batch 1) are unchanged.
+ // Build: see Makefile target `mnn-shim` (g++ -shared -fPIC, links libMNN.so).
+ #include <MNN/Interpreter.hpp>
+ #include <MNN/Tensor.hpp>
+ #include <cstring>
++#include <map>
+ #include <memory>
+ #include <string>
+ #include <vector>
+ 
+ namespace {
+-struct Handle {
+-    std::shared_ptr<MNN::Interpreter> net;
++struct SessionSet {
++    std::shared_ptr<MNN::Interpreter> net;  // the interpreter this session belongs to
+     MNN::Session* session = nullptr;
+-    std::vector<std::pair<std::string, MNN::Tensor*>> inputs, outputs;
+-    std::vector<std::unique_ptr<MNN::Tensor>> host_in, host_out;
+-    std::string err;
++    std::vector<std::pair<std::string, MNN::Tensor*>> inputs, outputs;  // map order
++    std::vector<std::vector<int>> in_shapes, out_shapes;
++};
++struct Handle {
++    std::map<std::string, std::shared_ptr<MNN::Interpreter>> nets;  // path -> interpreter
++    std::map<int, SessionSet> sessions;                              // batch -> session
+ };
+ void set_err(char* err, int errlen, const std::string& msg) {
+     if (err && errlen > 0) { std::strncpy(err, msg.c_str(), errlen - 1); err[errlen - 1] = 0; }
+ }
++SessionSet* get_set(Handle* h, int batch) {
++    auto it = h->sessions.find(batch);
++    return it == h->sessions.end() ? nullptr : &it->second;
++}
++std::shared_ptr<MNN::Interpreter> load_net(Handle* h, const std::string& path, std::string& err) {
++    auto it = h->nets.find(path);
++    if (it != h->nets.end()) return it->second;
++    std::shared_ptr<MNN::Interpreter> net(MNN::Interpreter::createFromFile(path.c_str()),
++                                          [](MNN::Interpreter* p) { if (p) MNN::Interpreter::destroy(p); });
++    if (!net) { err = "createFromFile failed: " + path; return nullptr; }
++    h->nets[path] = net;
++    return net;
++}
++MNN::ScheduleConfig make_cfg(int forward_type, int threads, MNN::BackendConfig& bc, int precision) {
++    MNN::ScheduleConfig cfg;
++    cfg.type = (MNNForwardType)forward_type;
++    cfg.numThread = threads > 0 ? threads : 1;
++    bc.precision = (MNN::BackendConfig::PrecisionMode)precision;
++    cfg.backendConfig = &bc;
++    return cfg;
++}
++// Create a session for `batch` on `net`; resize only if the model's own batch dim differs.
++bool build_session(Handle* h, std::shared_ptr<MNN::Interpreter> net, const MNN::ScheduleConfig& cfg, int batch, bool allow_resize, std::string& err) {
++    SessionSet s;
++    s.net = net;
++    s.session = net->createSession(cfg);
++    if (!s.session) { err = "createSession failed"; return false; }
++    bool need_resize = false;
++    for (auto& kv : net->getSessionInputAll(s.session)) {
++        auto shape = kv.second->shape();
++        if (!shape.empty() && shape[0] != batch) need_resize = true;
++    }
++    if (need_resize) {
++        if (!allow_resize) { err = "model batch dim != " + std::to_string(batch); net->releaseSession(s.session); return false; }
++        for (auto& kv : net->getSessionInputAll(s.session)) {
++            auto shape = kv.second->shape();
++            if (shape.empty()) continue;
++            shape[0] = batch;
++            net->resizeTensor(kv.second, shape);
++        }
++        net->resizeSession(s.session);
++    }
++    for (auto& kv : net->getSessionInputAll(s.session)) {
++        s.inputs.emplace_back(kv.first, kv.second);
++        s.in_shapes.push_back(kv.second->shape());
++    }
++    for (auto& kv : net->getSessionOutputAll(s.session)) {
++        s.outputs.emplace_back(kv.first, kv.second);
++        s.out_shapes.push_back(kv.second->shape());
++        if (!s.out_shapes.back().empty() && s.out_shapes.back()[0] != batch) {
++            err = "output " + kv.first + " batch dim did not follow the input";
++            net->releaseSession(s.session);
++            return false;
++        }
++    }
++    h->sessions[batch] = s;
++    return true;
++}
++void destroy(Handle* h) {
++    for (auto& kv : h->sessions) if (kv.second.session) kv.second.net->releaseSession(kv.second.session);
++    h->sessions.clear();
++    h->nets.clear();
++    delete h;
++}
++int run(SessionSet* s, const float* const* in, const size_t* in_elems, float* const* out, const size_t* out_elems) {
++    for (size_t i = 0; i < s->inputs.size(); i++) {
++        auto* dev = s->inputs[i].second;
++        if ((size_t)dev->elementSize() != in_elems[i]) return -2;
++        std::unique_ptr<MNN::Tensor> ht(MNN::Tensor::create<float>(s->in_shapes[i], (void*)in[i], MNN::Tensor::CAFFE));
++        dev->copyFromHostTensor(ht.get());
++    }
++    if (s->net->runSession(s->session) != MNN::NO_ERROR) return -3;
++    for (size_t i = 0; i < s->outputs.size(); i++) {
++        auto* dev = s->outputs[i].second;
++        if ((size_t)dev->elementSize() != out_elems[i]) return -4;
++        std::unique_ptr<MNN::Tensor> ht(MNN::Tensor::create<float>(s->out_shapes[i], (void*)out[i], MNN::Tensor::CAFFE));
++        dev->copyToHostTensor(ht.get());
++    }
++    return 0;
++}
+ }  // namespace
+ 
+ extern "C" {
+ 
+ // forward_type: MNNForwardType (0 CPU, 7 Vulkan, 3 OpenCL). precision: 0 normal, 1 high(fp32), 2 low(fp16).
+-void* mnn_shim_create(const char* model_path, int forward_type, int precision, int threads, char* err, int errlen) {
++// model_paths[i] is a .mnn whose input batch dim is batches[i] (it is resized if not, which is only correct on
++// the CPU backend). Batch 1 must be included.
++void* mnn_shim_create_multi(const char* const* model_paths, const int* batches, int n, int forward_type, int precision,
++                            int threads, char* err, int errlen) {
++    if (n <= 0 || !model_paths || !batches) { set_err(err, errlen, "no models"); return nullptr; }
+     auto h = new Handle();
+-    h->net.reset(MNN::Interpreter::createFromFile(model_path), [](MNN::Interpreter* p) { if (p) MNN::Interpreter::destroy(p); });
+-    if (!h->net) { set_err(err, errlen, std::string("createFromFile failed: ") + model_path); delete h; return nullptr; }
+-    MNN::ScheduleConfig cfg;
+-    cfg.type = (MNNForwardType)forward_type;
+-    cfg.numThread = threads > 0 ? threads : 1;
+     MNN::BackendConfig bc;
+-    bc.precision = (MNN::BackendConfig::PrecisionMode)precision;
+-    cfg.backendConfig = &bc;
+-    h->session = h->net->createSession(cfg);
+-    if (!h->session) { set_err(err, errlen, "createSession failed"); delete h; return nullptr; }
+-    for (auto& kv : h->net->getSessionInputAll(h->session)) {
+-        h->inputs.emplace_back(kv.first, kv.second);
+-        h->host_in.emplace_back(new MNN::Tensor(kv.second, MNN::Tensor::CAFFE));
+-    }
+-    for (auto& kv : h->net->getSessionOutputAll(h->session)) {
+-        h->outputs.emplace_back(kv.first, kv.second);
+-        h->host_out.emplace_back(new MNN::Tensor(kv.second, MNN::Tensor::CAFFE));
++    auto cfg = make_cfg(forward_type, threads, bc, precision);
++    std::string e;
++    for (int i = 0; i < n; i++) {
++        if (batches[i] <= 0 || h->sessions.count(batches[i])) continue;
++        auto net = load_net(h, model_paths[i], e);
++        if (!net || !build_session(h, net, cfg, batches[i], true, e)) {
++            set_err(err, errlen, "batch " + std::to_string(batches[i]) + " (" + model_paths[i] + "): " + e);
++            destroy(h);
++            return nullptr;
++        }
+     }
++    if (!h->sessions.count(1)) { set_err(err, errlen, "batch 1 session missing"); destroy(h); return nullptr; }
+     return h;
+ }
+ 
+-int mnn_shim_num_inputs(void* p) { return (int)((Handle*)p)->inputs.size(); }
+-int mnn_shim_num_outputs(void* p) { return (int)((Handle*)p)->outputs.size(); }
++// One model resized to every batch size in `batches` (n <= 0 -> {1}; 1 is always added).
++void* mnn_shim_create_batched(const char* model_path, int forward_type, int precision, int threads,
++                              const int* batches, int n_batches, char* err, int errlen) {
++    auto h = new Handle();
++    MNN::BackendConfig bc;
++    auto cfg = make_cfg(forward_type, threads, bc, precision);
++    std::string e;
++    auto net = load_net(h, model_path, e);
++    if (!net) { set_err(err, errlen, e); destroy(h); return nullptr; }
++    std::vector<int> want;
++    if (n_batches <= 0 || !batches) want.push_back(1);
++    else for (int i = 0; i < n_batches; i++) if (batches[i] > 0) want.push_back(batches[i]);
++    bool have1 = false;
++    for (int b : want) have1 |= (b == 1);
++    if (!have1) want.insert(want.begin(), 1);
++    for (int b : want) {
++        if (h->sessions.count(b)) continue;
++        if (!build_session(h, net, cfg, b, true, e)) {
++            set_err(err, errlen, "batch " + std::to_string(b) + ": " + e);
++            destroy(h);
++            return nullptr;
++        }
++    }
++    return h;
++}
+ 
+-// name -> buf; dims -> dims[0..ndim); returns ndim (or -1). which: 0 input, 1 output.
+-int mnn_shim_io_info(void* p, int which, int idx, char* name, int namelen, int* dims, int maxdims) {
+-    auto h = (Handle*)p;
+-    auto& v = which == 0 ? h->inputs : h->outputs;
++void* mnn_shim_create(const char* model_path, int forward_type, int precision, int threads, char* err, int errlen) {
++    int one = 1;
++    return mnn_shim_create_multi(&model_path, &one, 1, forward_type, precision, threads, err, errlen);
++}
++
++int mnn_shim_num_inputs(void* p) { return (int)get_set((Handle*)p, 1)->inputs.size(); }
++int mnn_shim_num_outputs(void* p) { return (int)get_set((Handle*)p, 1)->outputs.size(); }
++// batch sizes with a session, ascending; returns the count, fills up to max
++int mnn_shim_batches(void* p, int* out, int max) {
++    auto h = (Handle*)p; int n = 0;
++    for (auto& kv : h->sessions) { if (n < max) out[n] = kv.first; n++; }
++    return n;
++}
++
++// name -> buf; dims -> dims[0..ndim); returns ndim (or -1). which: 0 input, 1 output. Shapes of the batch-`batch` session.
++int mnn_shim_io_info_batch(void* p, int batch, int which, int idx, char* name, int namelen, int* dims, int maxdims) {
++    auto s = get_set((Handle*)p, batch);
++    if (!s) return -1;
++    auto& v = which == 0 ? s->inputs : s->outputs;
++    auto& shapes = which == 0 ? s->in_shapes : s->out_shapes;
+     if (idx < 0 || idx >= (int)v.size()) return -1;
+     set_err(name, namelen, v[idx].first);
+-    auto shape = v[idx].second->shape();
+-    int n = (int)shape.size();
+-    for (int i = 0; i < n && i < maxdims; i++) dims[i] = shape[i];
++    int n = (int)shapes[idx].size();
++    for (int i = 0; i < n && i < maxdims; i++) dims[i] = shapes[idx][i];
+     return n;
+ }
++int mnn_shim_io_info(void* p, int which, int idx, char* name, int namelen, int* dims, int maxdims) {
++    return mnn_shim_io_info_batch(p, 1, which, idx, name, namelen, dims, maxdims);
++}
+ 
+-// in[i] / out[i] are float32 buffers sized to the tensors' elementSize().
++// in[i] / out[i] are float32 buffers sized to the batch-`batch` session tensors' elementSize().
++int mnn_shim_infer_batch(void* p, int batch, const float* const* in, const size_t* in_elems, float* const* out, const size_t* out_elems) {
++    auto s = get_set((Handle*)p, batch);
++    if (!s) return -5;
++    return run(s, in, in_elems, out, out_elems);
++}
+ int mnn_shim_infer(void* p, const float* const* in, const size_t* in_elems, float* const* out, const size_t* out_elems) {
+-    auto h = (Handle*)p;
+-    for (size_t i = 0; i < h->inputs.size(); i++) {
+-        auto* ht = h->host_in[i].get();
+-        if ((size_t)ht->elementSize() != in_elems[i]) return -2;
+-        std::memcpy(ht->host<float>(), in[i], in_elems[i] * sizeof(float));
+-        h->inputs[i].second->copyFromHostTensor(ht);
+-    }
+-    if (h->net->runSession(h->session) != MNN::NO_ERROR) return -3;
+-    for (size_t i = 0; i < h->outputs.size(); i++) {
+-        auto* ht = h->host_out[i].get();
+-        if ((size_t)ht->elementSize() != out_elems[i]) return -4;
+-        h->outputs[i].second->copyToHostTensor(ht);
+-        std::memcpy(out[i], ht->host<float>(), out_elems[i] * sizeof(float));
+-    }
+-    return 0;
++    return mnn_shim_infer_batch(p, 1, in, in_elems, out, out_elems);
+ }
+ 
+ void mnn_shim_destroy(void* p) {
+-    auto h = (Handle*)p;
+-    if (!h) return;
+-    h->host_in.clear(); h->host_out.clear();
+-    if (h->session) h->net->releaseSession(h->session);
+-    h->net.reset();
+-    delete h;
++    if (p) destroy((Handle*)p);
+ }
+ 
+ }  // extern "C"
+diff -ruN old/detector/README-linux.md new/detector/README-linux.md
+--- old/detector/README-linux.md	2026-09-06 13:44:30.168752833 +0100
++++ new/detector/README-linux.md	2026-09-06 14:25:24.722756118 +0100
+@@ -7,7 +7,10 @@
+ `tcp://host.docker.internal:5555`. The same code still runs unchanged on
+ macOS (`--backend auto` picks CoreML there).
+ 
+-Installed 2026-09-05 (CPU), switched to Vulkan the same day.
++Installed 2026-09-05 (CPU), switched to Vulkan the same day; 2026-09-06: MNN batch-recording
++library, then the **v2 service** (ROUTER socket, batching knobs, zero-copy input, idempotent
++handshake) with the conv+SiLU fused library and a second Frigate detector process -- see
++"v2 service: several Frigate detector processes, batching" below.
+ 
+ ## What is installed
+ 
+@@ -17,7 +20,10 @@
+ | Python venv | `~/frigate/detector/venv` (system Python 3.14.6, created with `uv`) |
+ | Packages | `onnxruntime 1.29.0` (CPU EP), `ncnn 1.0.20260526` (pip wheel, Vulkan), `mnn 3.6.1` (converter only), `numpy 2.5.2`, `pyzmq 27.2.0`, `opencv-python-headless 5.0.0.93` — pinned in `requirements-linux.txt` |
+ | Models | `~/frigate/detector/models/` (`fox-person-cat-320.onnx` is the live one; `*.ncnn.param/.bin` and `*.mnn` next to it are conversion caches) |
+-| MNN shim | `./mnn_shim/` (C shim + `libmnn_shim.so`, links the source-built `../research/MNN-src/build/libMNN.so`) |
++| MNN shim | `./mnn_shim/` (C shim + `libmnn_shim.so`, `make mnn-shim` builds it against `mnn-batch/` (headers + `lib/libMNN.so`, rpath); `DETECTOR_MNN_LIB` overrides which `libMNN.so` is used at run time). v2 (2026-09-06) adds one session per batch size (`mnn_shim_create_multi`, `mnn_shim_infer_batch`); the v1 entry points are kept, `libmnn_shim.so.v1-20260905` is the old binary |
++| MNN batch-mode lib | `./mnn-batch/` (`lib/libMNN.so` built from `src/` = MNN `bef71b9` + `gpu-opt` patch `330e565`, `PROVENANCE.txt`, `build.sh`) — see "MNN batch-mode library" below; `lib-v2/libMNN.so` = the same + conv+SiLU fusion (`gpu-opt` patch `d9f1652`, `lib-v2/PROVENANCE.txt`, **production since 2026-09-06 afternoon**, engine 11.2 vs 12.0 ms) |
++| Batch variants | `models/<name>.b{2,4,8}.onnx` + `.mnn`: fixed-batch copies of the ONNX that `detector/onnx_batch.py` derives at load time when `DETECTOR_MAX_BATCH` > 1 (needs the `onnx` wheel); absent with the production `--max-batch 1` |
++| Load generator | `./loadgen.py` (N concurrent REQ clients at a fixed rate each, real frames, reply checking) — never point it at the live service, see below |
+ | Converters | `/usr/bin/onnx2ncnn`, `/usr/bin/ncnnoptimize` (Fedora `ncnn` package — used only as external processes) |
+ | systemd unit | `/etc/systemd/system/frigate-detector.service` (copy kept at `./frigate-detector.service`) |
+ | Test client | `./test_client.py` |
+@@ -26,7 +32,8 @@
+ 
+ ```
+ venv/bin/python detector/zmq_onnx_client.py --backend vulkan --threads 4 \
+-    --endpoint tcp://0.0.0.0:5555 --models-dir ~/frigate/detector/models --model AUTO
++    --endpoint tcp://0.0.0.0:5555 --models-dir ~/frigate/detector/models --model AUTO \
++    --max-batch 1 --batch-window-ms 0
+ ```
+ 
+ `--model AUTO` means: wait for Frigate's `model_request` handshake, load the named
+@@ -56,7 +63,7 @@
+ | --- | --- | --- | --- |
+ | `vulkan` | alias -> first of `DETECTOR_VULKAN_PREFERENCE` (default `ncnn-vulkan,mnn-vulkan`) that initialises | GPU | |
+ | `ncnn-vulkan` | ncnn pip wheel, Vulkan (Honeykrisp), fp16 | GPU | **~24 ms** engine, 28-31 ms incl. ZMQ (**live**) |
+-| `mnn-vulkan` | source-built libMNN via `mnn_shim/`, Vulkan, fp16 | GPU | ~20 ms engine (verified, see below) |
++| `mnn-vulkan` | source-built libMNN via `mnn_shim/`, Vulkan, fp16 | GPU | **~12-13 ms** engine with the batch-mode lib (`DETECTOR_MNN_LIB=mnn-batch/lib/libMNN.so`, 17.9 ms round trip at 25 req/s); ~20 ms with the stock research lib |
+ | `ncnn-cpu` | ncnn NEON, fp16 arithmetic | CPU | ~5 ms idle, but collapses under ffmpeg load |
+ | `cpu` | ONNX Runtime CPU EP, fp32 | CPU | 12 ms idle, 30-45 ms with Frigate's ffmpeg running |
+ | `coreml`, `onnxruntime` | macOS / explicit ORT providers | - | unchanged |
+@@ -78,7 +85,136 @@
+ skipped), `DETECTOR_NCNN_THREADS` (CPU-side helper threads for the GPU path,
+ default 1), `DETECTOR_VULKAN_PREFERENCE=mnn-vulkan,ncnn-vulkan` (order for the
+ `vulkan` alias), `DETECTOR_ONNX2NCNN` / `DETECTOR_NCNNOPTIMIZE` / `DETECTOR_MNNCONVERT`
+-(converter binaries), `DETECTOR_MNN_SHIM` / `DETECTOR_MNN_LIB` (shim / libMNN paths).
++(converter binaries), `DETECTOR_MNN_SHIM` / `DETECTOR_MNN_LIB` (shim / libMNN paths; `DETECTOR_MNN_LIB`
++is dlopen'ed with `RTLD_GLOBAL` before the shim, so it wins over the shim's rpath — the
++start-up line `[mnn-vulkan] shim ..., libMNN <path>` shows which `libMNN.so` the process
++actually mapped).
++
++## MNN batch-mode library (`mnn-batch/`, 2026-09-06)
++
++Phase 1 of the GPU runtime work (`~/gpu-opt/PHASE1_RUNTIME.md`) found that
++MNN's Vulkan backend records one `VkCommandBuffer` per op, which Honeykrisp turns into
++~474 GPU control streams per inference (half the GPU time idle, 6 ms of CPU in
++`queue_submit`). MNN's existing `MNN_GPU_RECORD_BATCH` mode records the whole graph
++into one command buffer; the patch
++`~/gpu-opt/patches/mnn/0001-Vulkan-record-the-whole-graph-into-one-command-buffe.patch`
++makes it the Vulkan default, so the shim needs no change (`cfg.numThread = 1` -> gpu
++mode 0x1 -> `TUNING_NONE | RECORD_BATCH` on the patched lib; opt-out is
++`MNN_GPU_RECORD_OP`).
++
++* `mnn-batch/src/` = `git archive 330e565` of `~/gpu-opt/MNN` (branch
++  `gpu-opt`): upstream `bef71b9` (exactly what `../research/MNN-src` is) + `11fdc84`
++  (the same `-D__STRICT_ANSI__` removal the research tree carries uncommitted) +
++  `330e565` (the patch). `mnn-batch/PROVENANCE.txt` records this.
++* `mnn-batch/build.sh` configures and builds it (`-DMNN_VULKAN=ON -DMNN_VULKAN_IMAGE=ON
++  -DMNN_OPENCL=OFF -DMNN_ARM82=ON`, tools/benchmark off, `ninja -j4`, ~2 min; run it
++  as `systemd-run --user --scope -p MemoryMax=5G mnn-batch/build.sh`) and copies the
++  result to `mnn-batch/lib/libMNN.so`. The 2026-09-06 build is md5-identical
++  (`d38a258b…`) to the library Phase 1 measured (`~/gpu-opt/MNN/build/libMNN.so`).
++  The research library `../research/MNN-src/build/libMNN.so` is untouched and remains
++  the shim's rpath default.
++* The service selects it with two `Environment=` lines in the unit:
++  `DETECTOR_VULKAN_PREFERENCE=mnn-vulkan,ncnn-vulkan` and
++  `DETECTOR_MNN_LIB=~/frigate/detector/mnn-batch/lib/libMNN.so` (`--backend
++  vulkan` stays; if mnn-vulkan cannot initialise the alias falls through to ncnn-vulkan,
++  then to cpu). The copy `./frigate-detector.service` already contains them.
++
++### Verified offline 2026-09-06 (Frigate live on 4 cameras, ncnn-vulkan detector serving it)
++
++Accuracy on 45 real frames (24 Frigate event snapshots from `clips/`, 21 frames from
++2026-09-05/06 recordings), same preprocessing as `test_client.py --input image`,
++post-processed detections (score > 0.4, NMS), all compared against `cpu` (ORT fp32):
++
++| | ncnn-vulkan fp16 | mnn-vulkan fp16, stock lib | mnn-vulkan fp16, batch lib |
++| --- | --- | --- | --- |
++| raw `output0` max / mean abs diff vs ORT | 12.4 / 0.133 | 3.76 / 0.048 | 3.76 / 0.048 |
++| detections cpu / gpu | 36 / 36 | 36 / 36 | 36 / 36 |
++| frames with class or count mismatch | 0 | 0 | 0 |
++| max score delta / max box-corner delta | 0.0145 / 1.15 px | 0.0042 / 0.25 px | 0.0042 / 0.25 px |
++| in-process engine avg (contended GPU) | 26.4 ms | 19.7 ms | **13.0 ms** |
++
++batch lib vs stock lib: raw outputs **bit-identical** on all 45 frames (max abs diff 0.0);
++`bench_mnn2` on the Phase 1 input gives the same md5 (`6d1d0a17`) as the stock build.
++
++Soak, `test_client.py --rate 25 --duration 300` (real cam2 frame) against a side
++instance on port 5556 started with `DETECTOR_MNN_LIB=mnn-batch/lib/libMNN.so --backend
++mnn-vulkan`, GPU shared with the live ncnn-vulkan service (detecting at ~8-10 fps):
++
++| backend | requests | timeouts/errors | avg | p50 | p95 | p99 | max | engine (`Inference stats`) | RSS | CPU | dmesg |
++| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
++| mnn-vulkan fp16, batch lib | 7501 (25.0/s, 300 s) | 0 / 0 | 17.9 ms | 17.4 | 24.0 | 29.4 | 39.8 | 13.6-15.3 ms avg, max 24-32 | 157 MB | 8 % of a core | no new AGX/GPU lines (27 -> 27 matches) |
++| (2026-09-05, same test) mnn-vulkan stock lib | 5001 | 0 / 0 | 23.9 | 23.2 | 29.5 | 35.7 | 77.6 | | 163 MB | | |
++| (2026-09-05, same test) ncnn-vulkan | 8251 | 0 / 0 | 30.8 | 30.5 | 38.0 | 44.0 | 86.6 | 26-29 ms | 177 MB | ~12 % | |
++
++The live ncnn-vulkan service's own stats during the soak stayed at its normal level
++(avg 32.9 ms, max 100.6 ms) — the batch lib does not starve a co-tenant. The ~12 ms
++quiet-GPU engine time from Phase 1 shows up as 13-15 ms here because the GPU was shared.
++
++### Switching production to it / rolling back
++
++```
++# switch (the copy here already carries the two Environment= lines)
++sudo cp ~/frigate/detector/frigate-detector.service /etc/systemd/system/
++sudo systemctl daemon-reload && sudo systemctl restart frigate-detector
++journalctl -u frigate-detector --since -2min | grep -E 'libMNN|Using inference backend|FALLBACK'
++#   expect: "[mnn-vulkan] shim ..., libMNN ~/frigate/detector/mnn-batch/lib/libMNN.so"
++#           "Using inference backend: mnn-vulkan(Vulkan, fp16)"  and no FALLBACK line
++curl -s http://127.0.0.1:5000/api/stats | jq .detectors     # inference_speed should settle ~15-20 ms within 2 min
++
++# rollback (previous production: ncnn-vulkan first, stock research libMNN)
++#   remove the two Environment=DETECTOR_VULKAN_PREFERENCE= / DETECTOR_MNN_LIB= lines from the unit, then
++sudo systemctl daemon-reload && sudo systemctl restart frigate-detector
++#   (or: only drop DETECTOR_MNN_LIB to keep mnn-vulkan on the stock library)
++```
++
++Frigate re-handshakes on its own; the `.mnn` conversion cache is already in `models/`.
++Caveat from Phase 1: with one 10 ms control stream per inference, batch mode is
++time-sliced against other GPU work (Frigate's Vulkan scalers, other benchmarks), so its
++tail latency under heavy GPU contention is higher than direct mode's even though the
++median is far lower; Frigate's 200 ms timeout leaves >5x margin (max seen 39.8 ms).
++
++
++## v2 service: several Frigate detector processes, batching (2026-09-06)
++
++Full measurements: `~/gpu-opt/PHASE3_DETECTOR.md`. Short version:
++
++* **Frigate never has two requests in flight on one detector process** (pcap of the live service: 0 % of requests
++  arrive while another is being served; even back-to-back requests are 13.5 ms apart, p50, because that is what
++  Frigate's detector process spends per request on dequeue / preprocess / `tobytes` / publish). The only way to
++  overlap that with the GPU, without patching the plugin, is to list the same endpoint **twice** in Frigate's
++  `detectors:` (`host_zmq` and `host_zmq_b` in `config/config.yaml`): Frigate feeds all detector processes from one
++  shared queue, so two requests can be in flight. Each process handshakes separately and after every timeout.
++* The service is therefore a **ROUTER** socket now (`zmq_onnx_client.py` v2; REQ clients need no change, replies to
++  vanished clients are dropped), drains everything queued in the socket after each inference, answers a handshake
++  for the already-loaded file without reloading it (the old REP service reloaded on every handshake; two clients
++  handshaking against it produced a reload storm that held Frigate at 190-250 ms / 0 detections for 2 minutes),
++  takes the tensor straight from the ZMQ frame (`copy=False`, `np.frombuffer`), and logs per-stage timings in its
++  `Inference stats` line (`DETECTOR_STATS_EVERY` requests, default 1000).
++* Knobs: `--max-batch N` / `DETECTOR_MAX_BATCH` (queued requests coalesced into one inference; `MnnBackend` then
++  builds sessions for 1, 2, 4 .. N from fixed-batch model variants) and `--batch-window-ms` /
++  `DETECTOR_BATCH_WINDOW_MS` (wait that long after the first queued request for more; 0 = never wait).
++  **Production uses `--max-batch 1`**: on this GPU a batch of 2/4/8 costs 2.1/3.1/6.2x a single frame (engine
++  12.0 -> 25.3 / 37.3 / 74.5 ms, 9.3 ms/frame at best), so batching lowered throughput headroom by ~20 % at the price
++  of 10-25 ms more latency per request in every load pattern tried, and produced the only timeouts of the sweep.
++  With `--max-batch 1` the batch-1 path is bit-identical to the 10:55 service (same `.mnn`, same session).
++* Batch>1 correctness needed: sessions created at their batch size (a session *resized* to batch>1 on the Vulkan
++  backend computes garbage or segfaults) and the YOLO DFL head rewritten in the batch variants (MNN flattens its
++  last-axis softmax to `N*8400` image rows, over the driver's 16384-row limit from N=2). With that, batch 2/4/8 give
++  the same 36/36 detections as batch 1 on the 45-frame set (score <= 0.003, box <= 0.37 px), not bit-identical.
++* Round trip: service-side Python is ~1.1 ms per request (`cProfile`); engine 11.2-12 ms quiet, 14-15 ms next to the
++  NVR; the rest of the ~18 ms round trip is the 1.23 MB tensor on TCP (0.9 ms on the wire) and the client. Shared
++  memory or uint8 tensors would need the Frigate plugin patched; not done.
++* Measured with 4 staggered clients at 5 fps (20 req/s, what 4 cameras look like): 18.9 ms avg, 28.3 ms p95, 0
++  timeouts, service at 6-7 % of a core. With 4 clients firing in lock-step: 43.8 / 66.6 ms (pure queueing).
++  10-minute soak (4 x 3 fps, lib-v2): 7204 requests, 0 timeouts/mismatches, 21.4 ms avg / 32.2 p95 / 56.4 max,
++  RSS flat at 158 MB, dmesg clean. Production after the switch (2026-09-06 14:08, real load): engine 13.4-14.5 ms
++  avg, queue-wait max 1.8 ms, Frigate `inference_speed` 24-27 ms per process, 0 timeouts in 15 min.
++
++Rollback of this step alone: `detectors:` back to the single `host_zmq` (`docker compose restart frigate`), and/or the
++unit's `DETECTOR_MNN_LIB` back to `mnn-batch/lib/libMNN.so`; `--max-batch 1` is already the sequential behaviour. The
++previous unit is `research/frigate-detector.service.before-v2` and the previous config
++`config/config.yaml.bak.<date>-v2`. **Never run `loadgen.py`/`test_client.py` with more than one client against the
++live port**; use a second instance on 5556.
+ 
+ ### Conversion cache
+ The protocol still hands the service `.onnx` files. On first load a GPU backend
+@@ -307,8 +443,10 @@
+   (max diff 0.002 vs ORT) for ~25 % more latency. `mnn-vulkan` fp16 is tighter
+   (0.4 px / 0.005).
+ - `mnn-vulkan` depends on the *research* tree (`../research/MNN-src/build/libMNN.so`,
+-  built from git bef71b9 with a GCC-16 patch) through the shim's rpath; move that
+-  tree and set `DETECTOR_MNN_LIB` / rebuild with `make mnn-shim MNN_SRC=...`.
++  built from git bef71b9 with a GCC-16 patch) through the shim's rpath unless
++  `DETECTOR_MNN_LIB` points elsewhere (production: `mnn-batch/lib/libMNN.so`, which is
++  self-contained and rebuilt with `mnn-batch/build.sh`); move the research tree and set
++  `DETECTOR_MNN_LIB` / rebuild with `make mnn-shim MNN_SRC=...`.
+   Rebuilding libMNN needs the steps in the research report (`-D__STRICT_ANSI__` removed).
+ - The `mnn` pip wheel is installed only for its converter; its own runtime is
+   CPU-only on Linux and is never loaded into the service.
+@@ -319,7 +457,8 @@
+   (16:14, before any of the work above). The pip wheel does not have that bug;
+   no GPU fault occurred during the soaks. Keep watching
+   `dmesg | grep -iE 'agx|asahi|gpu|fault'` after Mesa/kernel updates.
+-- Batch size 1 only for the GPU backends (all Frigate sends). Multiple
++- ncnn backends are batch 1 only; mnn-vulkan runs batch>1 only through the fixed-batch
++  variants (`onnx_batch.py`, YOLO-DFL rewrite) and is not used that way in production. Multiple
+   inputs/outputs are handled generically but were only tested with this
+   single-input/single-output YOLOv9 export. `dfine`'s `orig_target_sizes` int64
+   input would not work on ncnn (float-only); use `cpu` for such models.
+diff -ruN old/detector/requirements-linux.txt new/detector/requirements-linux.txt
+--- old/detector/requirements-linux.txt	2026-09-06 13:44:30.162395683 +0100
++++ new/detector/requirements-linux.txt	2026-09-06 14:25:24.722722035 +0100
+@@ -8,3 +8,4 @@
+ # GPU (Vulkan) backends -- see README-linux.md
+ ncnn==1.0.20260526      # ncnn-vulkan / ncnn-cpu backends (wheel has Vulkan; do NOT use Fedora's ncnn package here)
+ mnn==3.6.1              # only for its `mnnconvert` (the wheel's runtime is CPU-only); mnn-vulkan uses research/MNN-src
++onnx==1.22.0            # 2026-09-06: builds the fixed-batch-N ONNX variants for the batched mnn-vulkan sessions (detector/onnx_batch.py)

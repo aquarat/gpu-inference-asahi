@@ -172,6 +172,21 @@ through two `Environment=VK_*` lines in its unit: ViT-H image embedding
 1.80 -> 1.53 s in the service (cosine 0.9999 vs the stock driver), with the
 shared detector's p95 unchanged at ~36 ms during an embedding burst.
 
+### 6. Detector service: batching several cameras, request round trip (2026-09-06)
+
+Write-up: [`reports/PHASE3_DETECTOR.md`](reports/PHASE3_DETECTOR.md); code: [`detector/`](detector/).
+
+Frigate's zmq plugin never has two requests in flight on one detector process
+(pcap: 0 % overlap, 13.5 ms of Frigate-side work between back-to-back
+requests), so the service was rebuilt around a ROUTER socket with an optional
+batching queue and Frigate given a second detector process on the same
+endpoint. Batched MNN-Vulkan inference was made correct (sessions created at
+their batch size, YOLO DFL head rewritten to stay under the 16384-row Vulkan
+image limit) and measured: a batch of 2/4/8 costs 2.1/3.1/6.2x one frame on
+the M1, so it lowers latency for nobody -- production runs `--max-batch 1`,
+two Frigate processes, the conv+SiLU fused library: engine 13-14 ms next to
+the NVR, service Python ~1 ms per request, 0 timeouts.
+
 ## What was learned
 
 * On Honeykrisp the per-dispatch floor for a dependent chain is ~3.2-3.5 us
