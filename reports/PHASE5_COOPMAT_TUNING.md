@@ -276,6 +276,11 @@ All with the NVR live, `systemd-run --user --scope -p MemoryMax=5G`, `nice -n 10
 `inference_speed < 60 ms` checked before every run (`coopmat/gpu_ok.sh`), `dmesg` and the detector's
 fallback count checked after. "Phase 4" = the numbers in `PHASE4_COOPMAT.md`.
 
+**Caveat on absolute numbers.** The GPU is shared with a live NVR, and the background load moved over
+the afternoon: the shipped configuration measured 1134 t/s (+-2) in the quietest window and 1066-1077
+t/s (+-9 to +-24) two hours later with the detector busier. Every A/B pair below was measured
+back-to-back in one window, so the *ratios* are solid; treat single absolute figures as +-6 %.
+
 ### 4.1 llama-bench, Qwen2.5-0.5B, pp512, `-r 3` (t/s)
 
 | configuration | Q8_0 fa=1 | Q8_0 fa=0 | F16 fa=1 |
@@ -284,7 +289,7 @@ fallback count checked after. "Phase 4" = the numbers in `PHASE4_COOPMAT.md`.
 | Phase 4, private driver, coopmat (shader cache on) | 1055.0 | 991.1 | 1016.2 |
 | Phase 5 baseline (same, cache off) | 1001.6 | -- | -- |
 | + driver `VECLOAD=1` only | 1058.4 | -- | -- |
-| + ggml A-hoist only (**shipped**) | **1134.3** | -- | not re-measured |
+| + ggml A-hoist only (**shipped**) | **1134.3** (1066-1077 later, busier) | -- | not re-measured |
 | + ggml A-hoist + `VECLOAD=1` | 997.1 | -- | -- |
 | + ggml B-hoist only | 1103.5 | 1035.2 | 1110.3 |
 | + ggml B-hoist + `VECLOAD=1` | 993.9 | 930.7 | 1007.3 |
